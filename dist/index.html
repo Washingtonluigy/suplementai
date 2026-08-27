@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#FFE500" />
+    <meta name="description" content="Suplementaai — suplementos, whey, creatina, pré-treino e performance." />
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="icon" href="/assets/logo.png" />
+    <title>Suplementaai</title>
+    <link rel="stylesheet" href="/assets/index-current.css" />
+    <link rel="stylesheet" href="/assets/site-extra.css" />
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script type="importmap">
+    {
+      "imports": {
+        "react": "https://esm.sh/react@18.3.1",
+        "react/jsx-runtime": "https://esm.sh/react@18.3.1/jsx-runtime",
+        "react-dom/client": "https://esm.sh/react-dom@18.3.1/client",
+        "@supabase/supabase-js": "https://esm.sh/@supabase/supabase-js@2.57.4",
+        "lucide-react": "https://esm.sh/lucide-react@0.344.0?external=react",
+        "xlsx": "https://esm.sh/xlsx@0.18.5",
+        "@/": "/app/"
+      }
+    }
+    </script>
+  </head>
+  <body class="bg-black">
+    <div id="root"></div>
+    <script type="module" src="/app/main.js"></script>
+  </body>
+</html>

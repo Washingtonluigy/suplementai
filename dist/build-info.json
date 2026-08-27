@@ -1,0 +1,22 @@
+{
+  "build": "manual-esm-production",
+  "date": "2026-08-27",
+  "features": [
+    "clients-pagination",
+    "legacy-client-import",
+    "mt-entregas-api-v2-netlify",
+    "mt-live-delivery-quote",
+    "address-autocomplete-viacep",
+    "mercadopago-coupons",
+    "pix-5",
+    "installments-3x-interest-free-label",
+    "category-order",
+    "responsive-category-order",
+    "national-ecommerce",
+    "site-cms-no-sql",
+    "site-orders-existing-schema",
+    "admin-route"
+  ],
+  "mt_api": "Machine API v2 via Netlify Function; quote endpoint api-vendas.taximachine.com.br",
+  "database_changes": "none"
+}
