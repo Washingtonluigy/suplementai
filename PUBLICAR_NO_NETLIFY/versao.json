@@ -1,0 +1,13 @@
+{
+  "build": "SA-20260827-MT-SITE-PDV-01",
+  "data": "2026-08-27",
+  "inclui": [
+    "Gerenciar Site",
+    "Pedidos Site",
+    "Delivery no PDV com endereço",
+    "MT Entregas com bloqueio de taxa zero",
+    "Suplementaai",
+    "até 3x sem juros"
+  ],
+  "publicar": "Envie o conteúdo desta pasta para o MESMO projeto Netlify que atende o domínio usado pelo sistema."
+}

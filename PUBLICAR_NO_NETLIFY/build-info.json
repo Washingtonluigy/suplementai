@@ -1,0 +1,17 @@
+{
+  "version": "2026-08-27-mt-site-manual-delivery-fix",
+  "built_at": "2026-08-27T14:30:00-04:00",
+  "features": [
+    "MT Entregas via Supabase Edge Function existente (dist-only)",
+    "cotação automática no catálogo por endereço completo",
+    "autocomplete de endereço + CEP",
+    "delivery no PDV com dados completos e cotação MT",
+    "delivery_fee salvo no customer_orders",
+    "até 3x sem juros nos produtos",
+    "marca Suplementaai normalizada",
+    "Gerenciar Site e Pedidos Site visíveis no Master",
+    "e-commerce nacional mantido",
+    "clientes >1000 e importador mantidos",
+    "cupons, Mercado Pago e PIX mantidos"
+  ]
+}

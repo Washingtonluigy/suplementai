@@ -1,0 +1,90 @@
+import { jsx as _jsx, jsxs as _jsxs, Fragment as _Fragment } from "react/jsx-runtime";
+import { useEffect, useState } from 'react';
+import { supabase } from '/app/lib/supabase.js';
+import { Bike, ClipboardList, Eye, ExternalLink, X, Phone, MapPin, Clock, Printer } from 'lucide-react';
+import PrintableComanda from '/app/components/franchisee/PrintableComanda.js';
+import MtDeliveryModal, { getMtMeta, withoutMtMeta } from '/app/components/franchisee/MtDeliveryModal.js';
+const DELIVERY_SOURCE_LABELS = { whatsapp: 'WhatsApp', ifood: 'iFood', uber_eats: 'Uber Eats', rappi: 'Rappi', '99delivery': '99 Delivery', phone: 'Telefone', other: 'Outro' };
+const STATUS_FLOW = [
+    { key: 'pending', label: 'Pendente', color: 'bg-yellow-500/10 text-yellow-400' },
+    { key: 'accepted', label: 'Aceito', color: 'bg-blue-500/10 text-blue-400' },
+    { key: 'preparing', label: 'Em andamento', color: 'bg-purple-500/10 text-purple-400' },
+    { key: 'ready', label: 'Pronto', color: 'bg-green-500/10 text-green-400' },
+    { key: 'delivering', label: 'Em entrega', color: 'bg-orange-500/10 text-orange-400' },
+    { key: 'pickup', label: 'Pode retirar', color: 'bg-cyan-500/10 text-cyan-400' },
+    { key: 'delivered', label: 'Entregue', color: 'bg-green-600/10 text-green-600' },
+    { key: 'cancelled', label: 'Cancelado', color: 'bg-red-500/10 text-red-400' },
+];
+const PAYMENT_LABELS = { pix: 'PIX', credit_card: 'Crédito', debit_card: 'Débito', cash: 'Dinheiro', meal_voucher: 'Vale-refeição' };
+export default function FranchiseeOrders({ franchiseId }) {
+    const [orders, setOrders] = useState([]);
+    const [franchise, setFranchise] = useState(null);
+    const [loading, setLoading] = useState(true);
+    const [viewOrder, setViewOrder] = useState(null);
+    const [printOrder, setPrintOrder] = useState(null);
+    const [filterStatus, setFilterStatus] = useState('all');
+    const [mtEnabled, setMtEnabled] = useState(false);
+    const [dispatchOrder, setDispatchOrder] = useState(null);
+    const load = async () => {
+        const todayStart = new Date();
+        todayStart.setHours(0, 0, 0, 0);
+        const [{ data: orderData }, { data: franData }, { data: deliveryData }] = await Promise.all([
+            supabase.from('customer_orders').select('*').eq('franchise_id', franchiseId).gte('created_at', todayStart.toISOString()).order('created_at', { ascending: false }),
+            supabase.from('franchises').select('*').eq('id', franchiseId).maybeSingle(),
+            supabase.from('delivery_settings').select('mt_entregas_enabled').eq('franchise_id', franchiseId).maybeSingle(),
+        ]);
+        if (orderData)
+            setOrders(orderData);
+        if (franData)
+            setFranchise(franData);
+        setMtEnabled(Boolean(deliveryData?.mt_entregas_enabled));
+        setLoading(false);
+    };
+    useEffect(() => { load(); }, [franchiseId]);
+    const updateStatus = async (order, status) => {
+        // Update local status
+        await supabase.from('customer_orders').update({ status }).eq('id', order.id);
+        setViewOrder({ ...order, status: status });
+        // If order came from iFood, push status update back to iFood
+        if (order.delivery_source === 'ifood' && order.platform_order_id) {
+            const statusMap = {
+                accepted: 'confirmed',
+                preparing: 'preparing',
+                ready: 'ready',
+                delivering: 'dispatched',
+                cancelled: 'cancelled',
+            };
+            const ifoodStatus = statusMap[status];
+            if (ifoodStatus) {
+                try {
+                    const apiUrl = `${"https://sgvojdgbjvynnoherpqj.supabase.co"}/functions/v1/delivery-sync`;
+                    const { data: session } = await supabase.auth.getSession();
+                    await fetch(apiUrl, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${session.session?.access_token ?? "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNndm9qZGdianZ5bm5vaGVycHFqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODU3NDE4ODIsImV4cCI6MjEwMTMxNzg4Mn0.RuAHGD0VCcDxIL4jfSFXjyiC4ZzVgRAZna3j80ovIf4"}`,
+                            'apikey': "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNndm9qZGdianZ5bm5vaGVycHFqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODU3NDE4ODIsImV4cCI6MjEwMTMxNzg4Mn0.RuAHGD0VCcDxIL4jfSFXjyiC4ZzVgRAZna3j80ovIf4",
+                        },
+                        body: JSON.stringify({ action: 'update_status', order_id: order.id, status: ifoodStatus }),
+                    });
+                }
+                catch {
+                    // Status updated locally; iFood sync will retry on next sync cycle
+                }
+            }
+        }
+        load();
+    };
+    const statusInfo = (s) => STATUS_FLOW.find(st => st.key === s) ?? STATUS_FLOW[0];
+    const filtered = filterStatus === 'all' ? orders : orders.filter(o => o.status === filterStatus);
+    const pendingCount = orders.filter(o => o.status === 'pending').length;
+    return (_jsxs("div", { children: [_jsxs("div", { className: "flex items-center justify-between mb-4 flex-wrap gap-2", children: [_jsxs("div", { className: "flex items-center gap-2", children: [_jsx("h3", { className: "text-white font-bold text-lg", children: "Pedidos" }), pendingCount > 0 && _jsxs("span", { className: "bg-yellow-500/20 text-yellow-400 text-xs font-bold px-2 py-0.5 rounded-full", children: [pendingCount, " novo(s)"] })] }), _jsxs("select", { value: filterStatus, onChange: e => setFilterStatus(e.target.value), className: "bg-zinc-900 border border-zinc-800 text-white rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[#FFE500]", children: [_jsx("option", { value: "all", children: "Todos os status" }), STATUS_FLOW.map(s => _jsx("option", { value: s.key, children: s.label }, s.key))] })] }), _jsxs("p", { className: "text-zinc-500 text-xs mb-3", children: ["Mostrando apenas pedidos de hoje. Para ver pedidos antigos, acesse a aba ", _jsx("span", { className: "text-[#FFE500] font-medium", children: "Relat\u00F3rio" }), " e filtre por per\u00EDodo."] }), loading ? (_jsx("div", { className: "flex justify-center py-12", children: _jsx("div", { className: "w-6 h-6 border-2 border-zinc-700 border-t-[#FFE500] rounded-full animate-spin" }) })) : filtered.length === 0 ? (_jsxs("div", { className: "text-center py-12", children: [_jsx(ClipboardList, { size: 40, className: "mx-auto text-zinc-700 mb-3" }), _jsx("p", { className: "text-zinc-400 text-sm", children: "Nenhum pedido recebido." })] })) : (_jsx("div", { className: "space-y-3", children: filtered.map(order => {
+                    const si = statusInfo(order.status);
+                    const mtMeta = getMtMeta(order.notes);
+                    return (_jsxs("div", { className: "bg-zinc-900 border border-zinc-800 rounded-xl p-4", children: [_jsxs("div", { className: "flex items-start justify-between mb-2", children: [_jsxs("div", { children: [_jsxs("div", { className: "flex items-center gap-2 mb-1", children: [_jsx("h4", { className: "text-white font-bold text-sm", children: order.customer_name }), _jsx("span", { className: `text-xs px-2 py-0.5 rounded-full ${si.color}`, children: si.label })] }), _jsxs("p", { className: "text-zinc-500 text-xs flex items-center gap-1", children: [_jsx(Clock, { size: 11 }), " ", new Date(order.created_at).toLocaleString('pt-BR')] })] }), _jsxs("div", { className: "text-right", children: [_jsxs("p", { className: "text-[#FFE500] font-bold", children: ["R$ ", order.total.toFixed(2)] }), _jsxs("p", { className: "text-zinc-500 text-xs", children: [order.items?.length ?? 0, " item(ns)"] })] })] }), _jsxs("div", { className: "flex items-center gap-2 mt-2 flex-wrap", children: [order.delivery && _jsxs("span", { className: "text-orange-400 text-xs flex items-center gap-1", children: [_jsx(MapPin, { size: 11 }), " ", order.order_mode === 'pickup' ? 'Retirada' : 'Delivery'] }), order.delivery && order.delivery_source && _jsxs("span", { className: "text-zinc-500 text-xs", children: ["\u2014 ", DELIVERY_SOURCE_LABELS[order.delivery_source] ?? order.delivery_source] }), order.delivery_source === 'ifood' && _jsx("span", { className: "bg-red-500/10 text-red-400 text-xs font-medium px-1.5 py-0.5 rounded", children: "iFood" }), order.payment_method && _jsxs("span", { className: "text-zinc-500 text-xs", children: ["\u2014 ", PAYMENT_LABELS[order.payment_method] ?? order.payment_method] }), _jsxs("div", { className: "ml-auto flex items-center gap-2 flex-wrap justify-end", children: [order.delivery && order.order_mode !== 'pickup' && mtEnabled && (mtMeta?.id ? (_jsxs(_Fragment, { children: [_jsxs("span", { className: "bg-green-500/10 border border-green-500/20 text-green-400 text-xs font-bold px-2 py-1 rounded-lg flex items-center gap-1", children: [_jsx(Bike, { size: 13 }), " MT #", mtMeta.id] }), mtMeta.tracking && (_jsxs("a", { href: mtMeta.tracking, target: "_blank", rel: "noreferrer", className: "text-cyan-400 hover:text-cyan-300 text-xs flex items-center gap-1", children: [_jsx(ExternalLink, { size: 13 }), " Rastrear"] }))] })) : mtMeta?.status === 'requesting' || mtMeta?.status === 'ambiguous' ? (_jsxs("span", { className: "bg-orange-500/10 border border-orange-500/20 text-orange-400 text-xs font-medium px-2 py-1 rounded-lg flex items-center gap-1", children: [_jsx(Bike, { size: 13 }), " MT \u2014 verificar central"] })) : (_jsxs("button", { onClick: () => setDispatchOrder(order), disabled: order.status === 'cancelled' || order.status === 'delivered', className: "bg-[#FFE500] hover:bg-[#FFD000] text-black disabled:opacity-40 disabled:cursor-not-allowed text-xs font-bold px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition-colors", children: [_jsx(Bike, { size: 14 }), " Chamar motoboy"] }))), _jsxs("button", { onClick: () => setViewOrder(order), className: "text-zinc-400 hover:text-[#FFE500] text-xs flex items-center gap-1 transition-colors", children: [_jsx(Eye, { size: 14 }), " Ver detalhes"] }), _jsxs("button", { onClick: () => setPrintOrder(order), className: "text-zinc-400 hover:text-[#FFE500] text-xs flex items-center gap-1 transition-colors", children: [_jsx(Printer, { size: 14 }), " Imprimir"] })] })] })] }, order.id));
+                }) })), viewOrder && (_jsx("div", { className: "fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm", onClick: () => setViewOrder(null), children: _jsxs("div", { className: "bg-zinc-900 border border-zinc-800 rounded-2xl w-full max-w-md max-h-[85vh] overflow-y-auto", onClick: e => e.stopPropagation(), children: [_jsxs("div", { className: "flex items-center justify-between p-6 border-b border-zinc-800 sticky top-0 bg-zinc-900", children: [_jsx("h3", { className: "text-white font-bold text-lg", children: "Detalhes do Pedido" }), _jsx("button", { onClick: () => setViewOrder(null), className: "text-zinc-400 hover:text-white", children: _jsx(X, { size: 20 }) })] }), _jsxs("div", { className: "p-6 space-y-4", children: [_jsxs("div", { children: [_jsx("p", { className: "text-zinc-500 text-xs", children: "Cliente" }), _jsx("p", { className: "text-white font-bold", children: viewOrder.customer_name }), viewOrder.customer_phone && _jsxs("p", { className: "text-zinc-400 text-sm flex items-center gap-1 mt-1", children: [_jsx(Phone, { size: 12 }), " ", viewOrder.customer_phone] })] }), viewOrder.delivery && viewOrder.address && (_jsxs("div", { children: [_jsx("p", { className: "text-zinc-500 text-xs", children: "Endere\u00E7o de entrega" }), _jsxs("p", { className: "text-white text-sm flex items-center gap-1", children: [_jsx(MapPin, { size: 12 }), " ", viewOrder.address] }), viewOrder.customer_reference && _jsxs("p", { className: "text-zinc-400 text-xs mt-1", children: ["Ref: ", viewOrder.customer_reference] })] })), viewOrder.order_mode === 'pickup' && (_jsxs("div", { children: [_jsx("p", { className: "text-zinc-500 text-xs", children: "Tipo" }), _jsx("p", { className: "text-white text-sm", children: "Retirada no local" })] })), viewOrder.payment_method && (_jsxs("div", { children: [_jsx("p", { className: "text-zinc-500 text-xs", children: "Pagamento" }), _jsx("p", { className: "text-white text-sm", children: PAYMENT_LABELS[viewOrder.payment_method] ?? viewOrder.payment_method })] })), viewOrder.delivery && viewOrder.order_mode !== 'pickup' && mtEnabled && (() => {
+                                    const mtMeta = getMtMeta(viewOrder.notes);
+                                    return (_jsxs("div", { className: "bg-zinc-800/60 border border-zinc-700 rounded-xl p-3", children: [_jsx("p", { className: "text-zinc-500 text-xs mb-2", children: "MT Entregas" }), mtMeta?.id ? (_jsxs("div", { className: "flex items-center justify-between gap-2", children: [_jsxs("span", { className: "text-green-400 text-sm font-bold flex items-center gap-1.5", children: [_jsx(Bike, { size: 15 }), " Motoboy solicitado \u2014 #", mtMeta.id] }), mtMeta.tracking && (_jsxs("a", { href: mtMeta.tracking, target: "_blank", rel: "noreferrer", className: "text-cyan-400 text-xs flex items-center gap-1", children: [_jsx(ExternalLink, { size: 13 }), " Rastreio"] }))] })) : mtMeta?.status === 'requesting' || mtMeta?.status === 'ambiguous' ? (_jsxs("div", { children: [_jsxs("p", { className: "text-orange-400 text-sm flex items-center gap-1.5", children: [_jsx(Bike, { size: 15 }), " Solicita\u00E7\u00E3o bloqueada por seguran\u00E7a."] }), _jsx("p", { className: "text-orange-200/70 text-xs mt-1", children: "Confira a central MT Entregas antes de fazer uma nova chamada, pois a resposta anterior pode ter sido interrompida." })] })) : (_jsxs(_Fragment, { children: [mtMeta?.error && _jsx("p", { className: "text-red-400 text-xs mb-2", children: mtMeta.error }), _jsxs("button", { onClick: () => { setDispatchOrder(viewOrder); setViewOrder(null); }, disabled: viewOrder.status === 'cancelled' || viewOrder.status === 'delivered', className: "w-full bg-[#FFE500] hover:bg-[#FFD000] text-black disabled:opacity-40 font-bold text-sm rounded-lg py-2.5 flex items-center justify-center gap-2", children: [_jsx(Bike, { size: 16 }), " Chamar motoboy pela MT"] })] }))] }));
+                                })(), withoutMtMeta(viewOrder.notes) && (_jsxs("div", { children: [_jsx("p", { className: "text-zinc-500 text-xs", children: "Observa\u00E7\u00F5es" }), _jsx("p", { className: "text-white text-sm", children: withoutMtMeta(viewOrder.notes) })] })), _jsxs("div", { children: [_jsx("p", { className: "text-zinc-500 text-xs mb-2", children: "Itens" }), _jsx("div", { className: "space-y-2", children: Array.isArray(viewOrder.items) && viewOrder.items.map((item, i) => (_jsxs("div", { className: "bg-zinc-800/50 border border-zinc-700 rounded-lg p-3", children: [_jsxs("div", { className: "flex items-center justify-between", children: [_jsxs("p", { className: "text-white text-sm font-medium", children: [item.quantity, "x ", item.name] }), _jsxs("p", { className: "text-[#FFE500] text-sm", children: ["R$ ", (item.price * item.quantity).toFixed(2)] })] }), item.addons && item.addons.length > 0 && (_jsx("div", { className: "mt-1 pl-3", children: item.addons.map((a, j) => (_jsxs("p", { className: "text-zinc-500 text-xs", children: ["+ ", a.name, " ", a.price > 0 && `(R$ ${a.price.toFixed(2)})`] }, j))) }))] }, i))) }), (viewOrder.subtotal > 0 || viewOrder.discount_amount > 0 || (viewOrder.coupon_discount ?? 0) > 0 || viewOrder.delivery_fee > 0) && (_jsxs("div", { className: "mt-3 pt-3 border-t border-zinc-800 space-y-1 text-sm", children: [viewOrder.subtotal > 0 && _jsxs("div", { className: "flex justify-between text-zinc-400", children: [_jsx("span", { children: "Subtotal" }), _jsxs("span", { children: ["R$ ", viewOrder.subtotal.toFixed(2)] })] }), (viewOrder.coupon_discount ?? 0) > 0 && _jsxs("div", { className: "flex justify-between text-green-400", children: [_jsxs("span", { children: ["Cupom", viewOrder.coupon_code ? ` (${viewOrder.coupon_code})` : ''] }), _jsxs("span", { children: ["- R$ ", (viewOrder.coupon_discount ?? 0).toFixed(2)] })] }), viewOrder.discount_amount > 0 && _jsxs("div", { className: "flex justify-between text-green-400", children: [_jsxs("span", { children: ["Desconto PIX (", viewOrder.pix_discount_percent ?? 0, "%)"] }), _jsxs("span", { children: ["- R$ ", viewOrder.discount_amount.toFixed(2)] })] }), viewOrder.delivery_fee > 0 && _jsxs("div", { className: "flex justify-between text-zinc-400", children: [_jsx("span", { children: "Taxa de entrega" }), _jsxs("span", { children: ["R$ ", viewOrder.delivery_fee.toFixed(2)] })] })] })), _jsxs("div", { className: "flex items-center justify-between mt-3 pt-3 border-t border-zinc-800", children: [_jsx("p", { className: "text-white font-bold", children: "Total" }), _jsxs("p", { className: "text-[#FFE500] font-bold text-lg", children: ["R$ ", viewOrder.total.toFixed(2)] })] })] }), _jsxs("div", { children: [_jsx("p", { className: "text-zinc-500 text-xs mb-2", children: "Status do pedido" }), _jsx("div", { className: "flex flex-wrap gap-2", children: STATUS_FLOW.map(s => (_jsx("button", { onClick: () => updateStatus(viewOrder, s.key), className: `text-xs px-3 py-1.5 rounded-lg font-medium transition-colors ${viewOrder.status === s.key ? 'bg-[#FFE500] text-black' : 'bg-zinc-800 text-zinc-400 hover:text-white'}`, children: s.label }, s.key))) })] }), _jsxs("button", { onClick: () => { setPrintOrder(viewOrder); setViewOrder(null); }, className: "w-full bg-zinc-800 hover:bg-zinc-700 text-white font-bold rounded-lg py-2.5 flex items-center justify-center gap-2 transition-colors", children: [_jsx(Printer, { size: 16 }), " Imprimir comanda"] })] })] }) })), dispatchOrder && (_jsx(MtDeliveryModal, { order: dispatchOrder, franchiseId: franchiseId, onClose: () => setDispatchOrder(null), onSuccess: async () => { await load(); } })), printOrder && franchise && (_jsx(PrintableComanda, { order: printOrder, franchise: franchise, onClose: () => setPrintOrder(null) }))] }));
+}

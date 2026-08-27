@@ -1,0 +1,7 @@
+.Label{display:block;font-size:.75rem;line-height:1rem;font-weight:700;color:#a1a1aa;margin-bottom:.375rem}
+.Field{width:100%;background:#09090b;border:1px solid #27272a;border-radius:.5rem;padding:.625rem .75rem;font-size:.875rem;line-height:1.25rem;color:white;outline:none}
+.Field:focus{border-color:rgba(255,229,0,.5)}
+.MiniButton{display:inline-flex;align-items:center;gap:.5rem;padding:.5rem .75rem;background:#27272a;border-radius:.5rem;font-size:.75rem;line-height:1rem;font-weight:700;color:white}
+.MiniButton:hover{background:#3f3f46}.IconButton{padding:.5rem;background:#18181b;border-radius:.5rem;color:#a1a1aa}.IconButton:disabled{opacity:.3}
+/* SuplementaAI national ecommerce CMS */
+.Field{width:100%;background:#18181b;border:1px solid #3f3f46;color:#fff;border-radius:.5rem;padding:.65rem .75rem;font-size:.875rem;outline:none}.Field:focus{border-color:#ffe50080}.IconBtn{background:#18181b;border:1px solid #27272a;border-radius:.5rem;padding:.5rem;color:#a1a1aa;display:inline-flex;align-items:center;justify-content:center}.SmallYellow{background:#ffe500;color:#000;border-radius:.5rem;padding:.55rem .75rem;font-size:.75rem;font-weight:900;display:inline-flex;align-items:center;gap:.35rem}
