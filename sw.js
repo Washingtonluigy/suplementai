@@ -1,6 +1,6 @@
 // v2: HTML/JS/CSS usam rede primeiro para que desktop e mobile nunca fiquem
 // presos a versões diferentes do catálogo após um novo deploy no Netlify.
-const CACHE_NAME = 'suplementai-v3-pix-discount';
+const CACHE_NAME = 'suplementai-v4-client-import';
 const STATIC_ASSETS = [
   '/manifest.json',
   '/assets/pwa/icon-192.png',
