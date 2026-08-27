@@ -9,15 +9,38 @@ export default function ExportContactsTool({ onClose }) {
     const [filterFran, setFilterFran] = useState('all');
     useEffect(() => {
         (async () => {
-            const [{ data: custData }, { data: franData }] = await Promise.all([
-                supabase.from('customers').select('*').order('created_at', { ascending: false }),
-                supabase.from('franchises').select('*').order('name'),
-            ]);
-            if (custData)
-                setCustomers(custData);
-            if (franData)
-                setFranchises(franData);
-            setLoading(false);
+            try {
+                const [{ data: franData }, allCustomers] = await Promise.all([
+                    supabase.from('franchises').select('*').order('name'),
+                    (async () => {
+                        const rows = [];
+                        for (let from = 0;; from += 1000) {
+                            const { data, error } = await supabase
+                                .from('customers')
+                                .select('*')
+                                .order('created_at', { ascending: false })
+                                .order('id', { ascending: true })
+                                .range(from, from + 999);
+                            if (error)
+                                throw error;
+                            const page = (data ?? []);
+                            rows.push(...page);
+                            if (page.length < 1000)
+                                break;
+                        }
+                        return rows;
+                    })(),
+                ]);
+                setCustomers(allCustomers);
+                if (franData)
+                    setFranchises(franData);
+            }
+            catch (error) {
+                console.error('Erro ao carregar todos os contatos:', error);
+            }
+            finally {
+                setLoading(false);
+            }
         })();
     }, []);
     const franName = (id) => franchises.find(f => f.id === id)?.name ?? '—';

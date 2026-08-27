@@ -1,0 +1,11 @@
+{
+  "generatedAt": "2026-08-27T00:57:23.188Z",
+  "source": "SuplementaAI_FINAL_CLIENTES_1000_CORRIGIDO.zip",
+  "modules": 41,
+  "cssCandidates": 1811,
+  "supplementalCandidates": 1303,
+  "envReplaced": [
+    "VITE_SUPABASE_ANON_KEY",
+    "VITE_SUPABASE_URL"
+  ]
+}

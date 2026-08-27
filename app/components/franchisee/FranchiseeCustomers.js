@@ -132,10 +132,31 @@ export default function FranchiseeCustomers({ franchiseId }) {
     const [importStatus, setImportStatus] = useState(null);
     const load = async () => {
         setLoading(true);
-        const { data } = await supabase.from('customers').select('*').eq('franchise_id', franchiseId).order('created_at', { ascending: false });
-        if (data)
-            setCustomers(data);
-        setLoading(false);
+        try {
+            const allCustomers = [];
+            for (let from = 0;; from += 1000) {
+                const { data, error } = await supabase
+                    .from('customers')
+                    .select('*')
+                    .eq('franchise_id', franchiseId)
+                    .order('created_at', { ascending: false })
+                    .order('id', { ascending: true })
+                    .range(from, from + 999);
+                if (error)
+                    throw error;
+                const page = (data ?? []);
+                allCustomers.push(...page);
+                if (page.length < 1000)
+                    break;
+            }
+            setCustomers(allCustomers);
+        }
+        catch (error) {
+            console.error('Erro ao carregar todos os clientes:', error);
+        }
+        finally {
+            setLoading(false);
+        }
     };
     useEffect(() => { load(); }, [franchiseId]);
     const filtered = customers.filter(c => {
@@ -173,6 +194,8 @@ export default function FranchiseeCustomers({ franchiseId }) {
                     .from('customers')
                     .select('name,phone,email,cpf_cnpj,notes')
                     .eq('franchise_id', franchiseId)
+                    .order('created_at', { ascending: false })
+                    .order('id', { ascending: true })
                     .range(from, from + 999);
                 if (error)
                     throw new Error(`Falha ao consultar clientes atuais: ${error.message}`);
