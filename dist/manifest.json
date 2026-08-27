@@ -1,7 +1,7 @@
 {
-  "name": "Suplementaai - Sistema de Franquias",
-  "short_name": "Suplementaai",
-  "description": "Sistema de gestão de franquias Suplementaai",
+  "name": "SuplemEntaAí - Sistema de Franquias",
+  "short_name": "SuplemEntaAí",
+  "description": "Sistema de gestão de franquias SuplemEntaAí",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#000000",

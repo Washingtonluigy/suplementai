@@ -127,7 +127,7 @@ function quoteDetails(data) {
     const source = data?.data?.estimativa ?? data?.estimativa ?? data?.data ?? data ?? {};
     return {
         price: source?.estimativa_valor ?? source?.valor ?? source?.preco ?? source?.valor_estimado ?? null,
-        minutes: source?.estimativa_minutos ?? source?.estimativa_tempo_minutos ?? source?.tempo_minutos ?? source?.tempo ?? null,
+        minutes: source?.estimativa_tempo_minutos ?? source?.tempo_minutos ?? source?.tempo ?? null,
         km: source?.estimativa_km ?? source?.km ?? source?.distancia ?? null,
     };
 }
@@ -163,15 +163,28 @@ export default function MtDeliveryModal({ order, franchiseId, onClose, onSuccess
         location.pickupCity && location.pickupState &&
         location.deliveryAddress && location.deliveryNeighborhood && location.deliveryCity && location.deliveryState);
     const callMt = async (action, payload) => {
-        if (!settings?.mt_entregas_username || !settings?.mt_entregas_password)
+        if (!settings?.mt_entregas_username || !settings?.mt_entregas_password) {
             throw new Error('As credenciais da MT Entregas não estão preenchidas em Delivery.');
+        }
         const { data: sessionData } = await supabase.auth.getSession();
         const token = sessionData.session?.access_token;
-        if (!token)
-            throw new Error('Sua sessão expirou. Entre novamente no sistema.');
-        const response = await fetch('/.netlify/functions/mt-entregas', {
-            method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-            body: JSON.stringify({ action, franchise_id: franchiseId, payload }),
+        const response = await fetch(`${"https://sgvojdgbjvynnoherpqj.supabase.co"}/functions/v1/mt-entregas`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'apikey': "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNndm9qZGdianZ5bm5vaGVycHFqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODU3NDE4ODIsImV4cCI6MjEwMTMxNzg4Mn0.RuAHGD0VCcDxIL4jfSFXjyiC4ZzVgRAZna3j80ovIf4",
+                ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            },
+            body: JSON.stringify({
+                action,
+                payload: {
+                    ...payload,
+                    basic_auth: {
+                        username: settings.mt_entregas_username,
+                        password: settings.mt_entregas_password,
+                    },
+                },
+            }),
         });
         const data = await response.json().catch(() => ({}));
         return { response, data };

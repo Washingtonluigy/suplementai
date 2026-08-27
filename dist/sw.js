@@ -1,6 +1,6 @@
 // v2: HTML/JS/CSS usam rede primeiro para que desktop e mobile nunca fiquem
 // presos a versões diferentes do catálogo após um novo deploy no Netlify.
-const CACHE_NAME = 'suplementai-v6-ecommerce-growth-structure-mt-v2-20260827-mtv2-final-20260827';
+const CACHE_NAME = 'suplementai-v6-ecommerce-growth-structure-fix-20260827b';
 const STATIC_ASSETS = [
   '/manifest.json',
   '/assets/pwa/icon-192.png',
