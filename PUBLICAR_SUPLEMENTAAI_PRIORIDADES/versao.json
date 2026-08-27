@@ -1,0 +1,11 @@
+{
+  "version": "SA-20260827-PRIORITY-MASTER-PDV-MT02",
+  "modules": 46,
+  "features": [
+    "Master Gerenciar Site/Pedidos Site",
+    "PDV Delivery campos completos",
+    "3x sem juros",
+    "Suplementaai",
+    "MT cotação exige origem e destino completos"
+  ]
+}

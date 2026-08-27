@@ -1,0 +1,6 @@
+/index.html
+  Cache-Control: no-cache, no-store, must-revalidate
+/app-bundle.js
+  Cache-Control: no-cache, must-revalidate
+/versao.json
+  Cache-Control: no-cache, no-store, must-revalidate
