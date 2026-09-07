@@ -6,6 +6,10 @@
 [functions]
   node_bundler = "esbuild"
 
+[[edge_functions]]
+  path = "/api/frenet"
+  function = "frenet"
+
 [[redirects]]
   from = "/*"
   to = "/index.html"

@@ -1,9 +1,10 @@
-SUPLEMENTAAI V17 - DEPLOY PELO GIT SOMENTE COM A DIST
+SUPLEMENTAAI V18 - DEPLOY PELO GIT SOMENTE COM A DIST
 
 A pasta dist gerada por npm run build agora e um pacote Netlify completo.
 Ela contem:
 - site/ -> frontend pronto
-- netlify/functions/ -> backend Frenet, Analytics e acompanhamento
+- netlify/edge-functions/ -> cotacao Frenet (usa Netlify.env)
+- netlify/functions/ -> Analytics e acompanhamento
 - netlify.toml -> configuracao automatica do Netlify
 - package.json -> dependencia minima para as Functions
 
@@ -15,7 +16,7 @@ OPCAO RECOMENDADA
 2. Conecte esse repositorio ao Netlify.
 3. No Netlify adicione uma unica vez a variavel de ambiente FRENET_TOKEN com o token da sua conta Frenet.
 4. Nao configure Build command. O projeto ja esta compilado.
-5. O netlify.toml informa automaticamente Publish=site e Functions=netlify/functions.
+5. O netlify.toml informa automaticamente Publish=site, Functions=netlify/functions e a rota Edge /api/frenet.
 6. Nas proximas atualizacoes, gere npm run build e substitua no Git somente esses arquivos da nova dist.
 
 SE O SEU GIT TEM UMA PASTA /dist EM VEZ DE USAR O CONTEUDO COMO RAIZ
