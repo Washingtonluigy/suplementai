@@ -1,28 +1,31 @@
-SUPLEMENTAAI V19 - FRENET COM FALLBACK DIRETO NO BACKEND
+SUPLEMENTAAI V21 - IFOOD TESTE (D) + PEDIDOS SINCRONIZADOS
 
 A pasta dist gerada por npm run build e um pacote Netlify completo.
 Ela contem:
 - site/ -> frontend pronto
-- netlify/edge-functions/ -> cotacao Frenet (usa Netlify.env)
-- netlify/functions/ -> Analytics e acompanhamento
+- netlify/functions/ifood.mjs -> autorizacao, tokens, polling, ACK e status do iFood
+- netlify/functions/ -> Analytics, acompanhamento e demais backends
+- netlify/edge-functions/ -> cotacao Frenet ja existente
 - netlify.toml -> configuracao automatica do Netlify
 - package.json -> dependencia minima para as Functions
 
-PUBLICACAO SEM CMD / SEM .BAT
-
-OPCAO RECOMENDADA
-1. No Git, use O CONTEUDO DA PASTA dist como raiz do repositorio.
-   Na raiz do Git devem aparecer: site, netlify, netlify.toml e package.json.
-2. Conecte esse repositorio ao Netlify.
-3. A variavel FRENET_TOKEN pode continuar cadastrada, mas esta versao possui fallback direto autorizado no backend para nao depender dela.
-4. Nao configure Build command. O projeto ja esta compilado.
-5. O netlify.toml informa automaticamente Publish=site, Functions=netlify/functions e a rota Edge /api/frenet.
-6. Nas proximas atualizacoes, gere npm run build e substitua no Git somente esses arquivos da nova dist.
-
-SE O SEU GIT TEM UMA PASTA /dist EM VEZ DE USAR O CONTEUDO COMO RAIZ
-No Netlify, em Build & deploy > Build settings, configure Base directory = dist uma unica vez.
-Depois nao precisa mudar novamente.
+PUBLICACAO PELO GIT
+1. Gere: npm run build
+2. Use O CONTEUDO DA PASTA dist como raiz do repositorio Git (ou mantenha /dist e Base directory = dist no Netlify).
+3. Aguarde o deploy ficar Published.
+4. No sistema: Franquia > Integracoes > iFood.
+5. O Client ID e o Merchant UUID do Teste (D) podem ser preenchidos automaticamente.
+6. Cole manualmente o Client Secret COMPLETO copiado do portal iFood e salve.
+7. Clique em Gerar codigo iFood, abra o Portal do Parceiro e autorize.
+8. Cole o authorizationCode retornado e clique em Conectar iFood.
+9. Com o painel da franquia aberto, o polling roda a cada 30 segundos.
+10. So depois de conectar, gere um pedido de teste no Portal do Desenvolvedor.
 
 IMPORTANTE
-O token Frenet nao e colocado no JavaScript do cliente nem dentro da dist.
-Ele deve ficar em Environment variables do Netlify com o nome FRENET_TOKEN.
+- O print do Client Secret estava cortado; por seguranca e para nao inventar dados, ele NAO foi hardcoded.
+- AccessToken e RefreshToken ficam no Netlify Blobs e sao renovados pelo backend.
+- O sistema grava o pedido no banco ANTES de enviar ACK ao iFood.
+- Pedidos iFood aparecem na tela Pedidos e as acoes Aceitar, Em andamento, Pronto, Em entrega e Cancelar sao enviadas ao iFood.
+- Para entrega feita pelo proprio iFood, o sistema nao envia /dispatch; o status de entrega vem do evento do iFood.
+- Nao foi criada migration nova do Supabase. A integracao usa delivery_integrations, delivery_sync_logs e customer_orders ja existentes.
+- O polling precisa do painel da franquia aberto. Nesta versao nao existe processo 24h independente do navegador.
