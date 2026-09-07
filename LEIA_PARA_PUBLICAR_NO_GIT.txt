@@ -1,31 +1,33 @@
-SUPLEMENTAAI V21 - IFOOD TESTE (D) + PEDIDOS SINCRONIZADOS
+SUPLEMENTAAI V21 - IFOOD TESTE (D) SEM NETLIFY BLOBS
 
 A pasta dist gerada por npm run build e um pacote Netlify completo.
 Ela contem:
 - site/ -> frontend pronto
-- netlify/functions/ifood.mjs -> autorizacao, tokens, polling, ACK e status do iFood
-- netlify/functions/ -> Analytics, acompanhamento e demais backends
+- netlify/functions/ifood.mjs -> OAuth, polling e status do iFood
+- netlify/functions/ -> Analytics e acompanhamento ja existentes
 - netlify/edge-functions/ -> cotacao Frenet ja existente
 - netlify.toml -> configuracao automatica do Netlify
-- package.json -> dependencia minima para as Functions
+- package.json -> dependencias das outras Functions existentes
 
-PUBLICACAO PELO GIT
-1. Gere: npm run build
-2. Use O CONTEUDO DA PASTA dist como raiz do repositorio Git (ou mantenha /dist e Base directory = dist no Netlify).
-3. Aguarde o deploy ficar Published.
-4. No sistema: Franquia > Integracoes > iFood.
-5. O Client ID e o Merchant UUID do Teste (D) podem ser preenchidos automaticamente.
-6. Cole manualmente o Client Secret COMPLETO copiado do portal iFood e salve.
-7. Clique em Gerar codigo iFood, abra o Portal do Parceiro e autorize.
-8. Cole o authorizationCode retornado e clique em Conectar iFood.
-9. Com o painel da franquia aberto, o polling roda a cada 30 segundos.
-10. So depois de conectar, gere um pedido de teste no Portal do Desenvolvedor.
+PUBLICACAO
+1. Rode npm run build.
+2. Use O CONTEUDO DA PASTA dist como raiz do repositorio Git, como nas versoes anteriores.
+3. Na raiz do Git devem aparecer: site, netlify, netlify.toml e package.json.
+4. Espere o Netlify publicar.
+
+IFOOD - PRIMEIRO TESTE
+1. Entre em Franqueado > Integracoes > iFood.
+2. Use Preencher Teste (D).
+3. Cole o Client Secret COMPLETO do portal iFood, informe o Merchant UUID da loja de teste e salve.
+4. Clique Gerar codigo iFood.
+5. Abra o Portal do Parceiro pelo botao, autorize o aplicativo e copie o authorizationCode.
+6. Cole o authorizationCode no sistema e clique Conectar iFood.
+7. Depois, no portal iFood Developer, gere um pedido de teste.
+8. O painel consulta eventos automaticamente a cada 30 segundos. Tambem existe Buscar pedidos agora.
 
 IMPORTANTE
-- O print do Client Secret estava cortado; por seguranca e para nao inventar dados, ele NAO foi hardcoded.
-- AccessToken e RefreshToken ficam no Netlify Blobs e sao renovados pelo backend.
-- O sistema grava o pedido no banco ANTES de enviar ACK ao iFood.
-- Pedidos iFood aparecem na tela Pedidos e as acoes Aceitar, Em andamento, Pronto, Em entrega e Cancelar sao enviadas ao iFood.
-- Para entrega feita pelo proprio iFood, o sistema nao envia /dispatch; o status de entrega vem do evento do iFood.
-- Nao foi criada migration nova do Supabase. A integracao usa delivery_integrations, delivery_sync_logs e customer_orders ja existentes.
-- O polling precisa do painel da franquia aberto. Nesta versao nao existe processo 24h independente do navegador.
+- A integracao iFood V21 NAO usa Netlify Blobs.
+- Nao precisa configurar Site ID, token do Netlify Blobs ou comandos extras para o iFood.
+- OAuth/token iFood sao persistidos criptografados usando as tabelas de integracao que o projeto ja possui.
+- Nao foi criada migration nova nem tabela nova.
+- Antes de producao, o aplicativo Farm Tecnologia ainda precisa passar pela homologacao do iFood.

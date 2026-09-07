@@ -1,532 +1,655 @@
-import { getStore } from '@netlify/blobs';
-import { SUPABASE_URL, SUPABASE_ANON_KEY, getSupabaseUser, authorizeAnalytics } from './_supabase-public.mjs';
+import { createHash, createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
+import { SUPABASE_URL, SUPABASE_ANON_KEY, getSupabaseUser } from './_supabase-public.mjs';
 
 const IFOOD_BASE = 'https://merchant-api.ifood.com.br';
-const TEST_CLIENT_ID = '7781671b-9fca-494d-bb7a-a08e7d8bd28c';
-const cors = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-  'Access-Control-Allow-Methods': 'POST,OPTIONS',
-  'Content-Type': 'application/json',
+const AUTH_BASE = `${IFOOD_BASE}/authentication/v1.0`;
+const EVENTS_BASE = `${IFOOD_BASE}/events/v1.0`;
+const ORDER_BASE = `${IFOOD_BASE}/order/v1.0`;
+
+const json = (statusCode, body) => ({
+  statusCode,
+  headers: {
+    'content-type': 'application/json; charset=utf-8',
+    'access-control-allow-origin': '*',
+    'access-control-allow-headers': 'Content-Type, Authorization',
+    'access-control-allow-methods': 'POST, OPTIONS',
+    'cache-control': 'no-store',
+  },
+  body: JSON.stringify(body),
+});
+
+const safeText = async (response) => {
+  const text = await response.text().catch(() => '');
+  if (!text) return '';
+  try { return JSON.stringify(JSON.parse(text)); } catch { return text; }
 };
-const json = (statusCode, body) => ({ statusCode, headers: cors, body: JSON.stringify(body) });
-const safeString = (value, max = 4000) => String(value ?? '').slice(0, max);
-const isTestIntegration = integration => String(integration?.client_id || '') === TEST_CLIENT_ID;
 
-async function readJsonSafe(response) {
-  const text = await response.text();
-  if (!text) return null;
-  try { return JSON.parse(text); } catch { return { raw: text }; }
-}
-
-function ifoodError(payload, fallback) {
-  return payload?.error?.message || payload?.message || payload?.error_description || payload?.details?.[0]?.message || payload?.raw || fallback;
-}
-
-async function getIntegration(event, integrationId) {
-  const auth = await getSupabaseUser(event);
-  if (!auth) throw Object.assign(new Error('Sessão obrigatória.'), { status: 401 });
-  if (!integrationId) throw Object.assign(new Error('Integração obrigatória.'), { status: 400 });
-  const response = await fetch(`${SUPABASE_URL}/rest/v1/delivery_integrations?select=*&id=eq.${encodeURIComponent(integrationId)}&limit=1`, {
-    headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${auth.token}`, Accept: 'application/json' },
-  });
-  const rows = await readJsonSafe(response);
-  const integration = Array.isArray(rows) ? rows[0] : null;
-  if (!response.ok || !integration) throw Object.assign(new Error('Integração não encontrada.'), { status: response.status || 404 });
-  if (integration.platform !== 'ifood') throw Object.assign(new Error('Esta integração não é do iFood.'), { status: 400 });
-  const allowed = await authorizeAnalytics(event, integration.franchise_id);
-  if (!allowed.ok) throw Object.assign(new Error(allowed.error || 'Sem permissão para esta integração.'), { status: allowed.status || 403 });
-  return { auth, integration };
-}
-
-async function patchIntegration(auth, integrationId, patch) {
-  const response = await fetch(`${SUPABASE_URL}/rest/v1/delivery_integrations?id=eq.${encodeURIComponent(integrationId)}`, {
-    method: 'PATCH',
-    headers: {
-      apikey: SUPABASE_ANON_KEY,
-      Authorization: `Bearer ${auth.token}`,
-      'Content-Type': 'application/json',
-      Prefer: 'return=minimal',
-    },
-    body: JSON.stringify({ ...patch, updated_at: new Date().toISOString() }),
-  });
-  if (!response.ok) {
-    const payload = await readJsonSafe(response);
-    throw new Error(ifoodError(payload, 'Não foi possível atualizar a integração.'));
-  }
-}
-
-async function logSync(auth, integrationId, action, status, message, payload = {}, platformOrderId = null) {
-  try {
-    await fetch(`${SUPABASE_URL}/rest/v1/delivery_sync_logs`, {
-      method: 'POST',
-      headers: {
-        apikey: SUPABASE_ANON_KEY,
-        Authorization: `Bearer ${auth.token}`,
-        'Content-Type': 'application/json',
-        Prefer: 'return=minimal',
-      },
-      body: JSON.stringify({ integration_id: integrationId, action, platform_order_id: platformOrderId, payload, status, message }),
-    });
-  } catch { /* log nunca pode interromper o fluxo principal */ }
-}
-
-function authHeaders(token, integration, extra = {}) {
+function sbHeaders(userToken, extra = {}) {
   return {
-    Authorization: `Bearer ${token}`,
+    apikey: SUPABASE_ANON_KEY,
+    Authorization: `Bearer ${userToken}`,
     Accept: 'application/json',
-    ...(isTestIntegration(integration) ? { 'x-request-homologation': 'true' } : {}),
     ...extra,
   };
 }
 
-function tokenStore() {
-  return getStore({ name: 'suplementaai-ifood-oauth', consistency: 'strong' });
+async function sbGet(path, userToken) {
+  const response = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, { headers: sbHeaders(userToken) });
+  const data = await response.json().catch(() => []);
+  if (!response.ok) throw new Error(data?.message || data?.error || `Supabase GET ${response.status}`);
+  return data;
 }
 
-async function getOAuthState(integrationId) {
-  return await tokenStore().get(`integration/${integrationId}`, { type: 'json', consistency: 'strong' }).catch(() => null);
+async function sbInsert(table, payload, userToken) {
+  const response = await fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
+    method: 'POST',
+    headers: sbHeaders(userToken, { 'Content-Type': 'application/json', Prefer: 'return=representation' }),
+    body: JSON.stringify(payload),
+  });
+  const data = await response.json().catch(() => []);
+  if (!response.ok) throw new Error(data?.message || data?.error || `Supabase INSERT ${response.status}`);
+  return Array.isArray(data) ? data[0] : data;
 }
 
-async function setOAuthState(integrationId, state) {
-  await tokenStore().setJSON(`integration/${integrationId}`, { ...state, updatedAt: new Date().toISOString() });
+async function sbPatch(table, filter, payload, userToken) {
+  const response = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${filter}`, {
+    method: 'PATCH',
+    headers: sbHeaders(userToken, { 'Content-Type': 'application/json', Prefer: 'return=representation' }),
+    body: JSON.stringify(payload),
+  });
+  const data = await response.json().catch(() => []);
+  if (!response.ok) throw new Error(data?.message || data?.error || `Supabase PATCH ${response.status}`);
+  return Array.isArray(data) ? data[0] : data;
 }
 
-async function requestUserCode(integration) {
-  if (!integration.client_id) throw Object.assign(new Error('Preencha e salve o Client ID do iFood.'), { status: 400 });
-  const body = new URLSearchParams({ clientId: integration.client_id });
-  const response = await fetch(`${IFOOD_BASE}/authentication/v1.0/oauth/userCode`, {
-    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' }, body,
-  });
-  const payload = await readJsonSafe(response);
-  if (!response.ok) throw Object.assign(new Error(ifoodError(payload, `iFood recusou o código de vínculo (${response.status}).`)), { status: response.status });
-  return payload;
+async function authorizeFranchise(user, userToken, franchiseId) {
+  if (user?.user_metadata?.role === 'master') return true;
+  const rows = await sbGet(`franchise_users?select=franchise_id&auth_user_id=eq.${encodeURIComponent(user.id)}&limit=1`, userToken);
+  return String(rows?.[0]?.franchise_id || '') === String(franchiseId || '');
 }
 
-async function exchangeAuthorizationCode(integration, authorizationCode, verifier) {
-  if (!integration.client_id || !integration.client_secret) throw Object.assign(new Error('Preencha e salve Client ID e Client Secret do iFood.'), { status: 400 });
-  if (!authorizationCode) throw Object.assign(new Error('Informe o código de autorização mostrado pelo iFood.'), { status: 400 });
-  if (!verifier) throw Object.assign(new Error('O código de vínculo expirou ou não foi encontrado. Gere um novo código.'), { status: 400 });
-  const body = new URLSearchParams({
-    grantType: 'authorization_code', clientId: integration.client_id, clientSecret: integration.client_secret,
-    authorizationCode: String(authorizationCode).trim(), authorizationCodeVerifier: verifier,
-  });
-  const response = await fetch(`${IFOOD_BASE}/authentication/v1.0/oauth/token`, {
-    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' }, body,
-  });
-  const payload = await readJsonSafe(response);
-  if (!response.ok) throw Object.assign(new Error(ifoodError(payload, `Falha ao gerar token iFood (${response.status}).`)), { status: response.status });
-  return payload;
+async function loadIntegration(integrationId, auth) {
+  const rows = await sbGet(`delivery_integrations?select=*&id=eq.${encodeURIComponent(integrationId)}&limit=1`, auth.token);
+  const integration = rows?.[0];
+  if (!integration) throw new Error('Integração iFood não encontrada.');
+  if (integration.platform !== 'ifood') throw new Error('A integração selecionada não é do iFood.');
+  const allowed = await authorizeFranchise(auth.user, auth.token, integration.franchise_id);
+  if (!allowed) throw new Error('Você não tem permissão para esta integração.');
+  return integration;
 }
 
-async function refreshAccessToken(integration, state) {
-  if (!state?.refreshToken) throw Object.assign(new Error('iFood precisa ser autorizado novamente.'), { status: 401, reconnect: true });
-  const body = new URLSearchParams({
-    grantType: 'refresh_token', clientId: integration.client_id, clientSecret: integration.client_secret, refreshToken: state.refreshToken,
-  });
-  const response = await fetch(`${IFOOD_BASE}/authentication/v1.0/oauth/token`, {
-    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' }, body,
-  });
-  const payload = await readJsonSafe(response);
-  if (!response.ok) throw Object.assign(new Error(ifoodError(payload, `Não foi possível renovar o token iFood (${response.status}).`)), { status: response.status, reconnect: response.status === 401 });
-  const expiresIn = Math.max(60, Number(payload?.expiresIn || 0));
-  const next = {
-    ...state,
-    accessToken: payload.accessToken,
-    refreshToken: payload.refreshToken || state.refreshToken,
-    tokenType: payload.type || state.tokenType || 'bearer',
-    tokenExpiresAt: Date.now() + expiresIn * 1000,
+function deriveKey(secret, integrationId) {
+  return createHash('sha256').update(`${secret}:${integrationId}:suplementaai-ifood-oauth-v21`).digest();
+}
+
+function encryptState(state, secret, integrationId) {
+  const iv = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm', deriveKey(secret, integrationId), iv);
+  const encrypted = Buffer.concat([cipher.update(JSON.stringify(state), 'utf8'), cipher.final()]);
+  return {
+    v: 1,
+    iv: iv.toString('base64url'),
+    tag: cipher.getAuthTag().toString('base64url'),
+    data: encrypted.toString('base64url'),
   };
-  return next;
 }
 
-async function ensureAccessToken(integration) {
-  let state = await getOAuthState(integration.id);
-  if (!state?.accessToken) throw Object.assign(new Error('iFood ainda não foi autorizado nesta franquia.'), { status: 401, reconnect: true });
-  if (!state.tokenExpiresAt || Number(state.tokenExpiresAt) - Date.now() < 5 * 60 * 1000) {
-    state = await refreshAccessToken(integration, state);
-    await setOAuthState(integration.id, state);
+function decryptState(envelope, secret, integrationId) {
+  if (!envelope?.iv || !envelope?.tag || !envelope?.data) return null;
+  try {
+    const decipher = createDecipheriv('aes-256-gcm', deriveKey(secret, integrationId), Buffer.from(envelope.iv, 'base64url'));
+    decipher.setAuthTag(Buffer.from(envelope.tag, 'base64url'));
+    const decrypted = Buffer.concat([
+      decipher.update(Buffer.from(envelope.data, 'base64url')),
+      decipher.final(),
+    ]).toString('utf8');
+    return JSON.parse(decrypted);
+  } catch {
+    return null;
   }
-  return state;
 }
 
-async function listMerchants(token, integration) {
-  const response = await fetch(`${IFOOD_BASE}/merchant/v1.0/merchants?page=1&size=100`, { headers: authHeaders(token, integration) });
-  const payload = await readJsonSafe(response);
-  if (!response.ok) throw Object.assign(new Error(ifoodError(payload, `Não foi possível listar lojas iFood (${response.status}).`)), { status: response.status });
-  return Array.isArray(payload)
-    ? payload
-    : Array.isArray(payload?.merchants)
-      ? payload.merchants
-      : Array.isArray(payload?.elements)
-        ? payload.elements
-        : Array.isArray(payload?.items)
-          ? payload.items
-          : [];
+async function insertLog(integration, auth, { status = 'success', message = '', payload = {}, platformOrderId = null, action = 'status_update' }) {
+  return sbInsert('delivery_sync_logs', {
+    integration_id: integration.id,
+    action,
+    platform_order_id: platformOrderId,
+    payload,
+    status,
+    message,
+  }, auth.token);
 }
 
-function mapPayment(order) {
-  const methods = Array.isArray(order?.payments?.methods) ? order.payments.methods : [];
-  const primary = methods[0] || {};
-  const method = String(primary.method || '').toUpperCase();
-  if (method === 'PIX') return 'pix';
-  if (method === 'CREDIT') return 'credit_card';
-  if (method === 'DEBIT') return 'debit_card';
-  if (method === 'CASH') return 'cash';
-  if (method.includes('VOUCHER')) return 'meal_voucher';
+async function loadOAuthState(integration, auth) {
+  // Filtra no próprio PostgREST para que o estado OAuth não desapareça do alcance
+  // mesmo que a loja gere centenas de logs de pedido entre uma renovação e outra.
+  const contains = encodeURIComponent(JSON.stringify({ kind: 'ifood_oauth_state_v21' }));
+  const rows = await sbGet(
+    `delivery_sync_logs?select=id,payload,created_at,message&integration_id=eq.${encodeURIComponent(integration.id)}&action=eq.status_update&payload=cs.${contains}&order=created_at.desc&limit=5`,
+    auth.token,
+  );
+  for (const row of rows || []) {
+    const state = decryptState(row?.payload?.state, integration.client_secret || '', integration.id);
+    if (state) return state;
+  }
   return null;
 }
 
+async function saveOAuthState(integration, auth, state, message) {
+  const envelope = encryptState(state, integration.client_secret || '', integration.id);
+  await insertLog(integration, auth, {
+    status: 'success',
+    message,
+    payload: { kind: 'ifood_oauth_state_v21', state: envelope },
+  });
+}
+
+async function ifoodForm(path, form) {
+  const response = await fetch(`${AUTH_BASE}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
+    body: new URLSearchParams(form),
+  });
+  const text = await response.text();
+  let data = null;
+  try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
+  if (!response.ok) {
+    const message = data?.error?.message || data?.message || data?.error_description || text || `HTTP ${response.status}`;
+    throw new Error(`iFood: ${message}`);
+  }
+  return data || {};
+}
+
+function normalizeTokenResponse(data, previousRefreshToken = '') {
+  const accessToken = data.accessToken || data.access_token || '';
+  const refreshToken = data.refreshToken || data.refresh_token || previousRefreshToken || '';
+  const expiresIn = Number(data.expiresIn || data.expires_in || 10800);
+  if (!accessToken) throw new Error('O iFood não retornou accessToken.');
+  return {
+    accessToken,
+    refreshToken,
+    expiresIn,
+    expiresAt: Date.now() + Math.max(60, expiresIn) * 1000,
+    tokenType: data.type || data.token_type || 'bearer',
+  };
+}
+
+async function refreshAccessToken(integration, auth, state) {
+  if (!state?.refreshToken) throw new Error('Refresh token do iFood não encontrado. Conecte a loja novamente.');
+  const data = await ifoodForm('/oauth/token', {
+    grantType: 'refresh_token',
+    clientId: integration.client_id,
+    clientSecret: integration.client_secret,
+    refreshToken: state.refreshToken,
+  });
+  const nextToken = normalizeTokenResponse(data, state.refreshToken);
+  const next = { ...state, ...nextToken, refreshedAt: new Date().toISOString(), disconnected: false };
+  await saveOAuthState(integration, auth, next, 'Token iFood renovado automaticamente.');
+  return next;
+}
+
+async function ensureToken(integration, auth, forceRefresh = false) {
+  let state = await loadOAuthState(integration, auth);
+  if (!state || state.disconnected) throw new Error('Loja iFood ainda não está conectada.');
+  const expiresSoon = !state.accessToken || !state.expiresAt || Number(state.expiresAt) <= Date.now() + 120000;
+  if (forceRefresh || expiresSoon) state = await refreshAccessToken(integration, auth, state);
+  return state;
+}
+
+async function ifoodApiFetch(url, token, options = {}) {
+  return fetch(url, {
+    ...options,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/json',
+      ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+      ...(options.headers || {}),
+    },
+  });
+}
+
+async function withFreshToken(integration, auth, requestFactory) {
+  let state = await ensureToken(integration, auth);
+  let response = await requestFactory(state.accessToken);
+  if (response.status === 401 && state.refreshToken) {
+    state = await refreshAccessToken(integration, auth, state);
+    response = await requestFactory(state.accessToken);
+  }
+  return { response, state };
+}
+
+function paymentMethodFromOrder(order) {
+  const method = order?.payments?.methods?.[0]?.method;
+  const map = {
+    PIX: 'pix',
+    CREDIT: 'credit_card',
+    DEBIT: 'debit_card',
+    CASH: 'cash',
+    MEAL_VOUCHER: 'meal_voucher',
+    FOOD_VOUCHER: 'meal_voucher',
+  };
+  return map[String(method || '').toUpperCase()] || null;
+}
+
+function customerPhone(order) {
+  const phone = order?.customer?.phone;
+  if (!phone) return null;
+  if (typeof phone === 'string') return phone;
+  const parts = [phone.countryCode, phone.areaCode, phone.number].filter(Boolean).map(String);
+  return parts.length ? parts.join('') : (phone.localizer ? String(phone.localizer) : null);
+}
+
+function formatAddress(order) {
+  const address = order?.delivery?.deliveryAddress;
+  if (!address) return null;
+  const line = address.formattedAddress || [address.streetName, address.streetNumber].filter(Boolean).join(', ');
+  return [line, address.neighborhood, address.city && address.state ? `${address.city}/${address.state}` : address.city || address.state, address.postalCode ? `CEP ${address.postalCode}` : null]
+    .filter(Boolean)
+    .join(' - ');
+}
+
 function mapItems(order) {
-  return (Array.isArray(order?.items) ? order.items : []).map(item => ({
+  return (order?.items || []).map((item) => ({
     id: item.id || item.uniqueId || null,
-    externalCode: item.externalCode || null,
+    external_code: item.externalCode || null,
     name: item.name || 'Item iFood',
     quantity: Number(item.quantity || 0),
-    price: Number(item.unitPrice != null ? item.unitPrice : (Number(item.price || 0) / Math.max(1, Number(item.quantity || 1)))),
-    totalPrice: Number(item.totalPrice ?? item.price ?? 0),
-    observations: item.observations || null,
-    image_url: item.imageUrl || null,
-    addons: (Array.isArray(item.options) ? item.options : []).map(option => ({
-      name: option.name || 'Adicional', quantity: Number(option.quantity || 1), price: Number(option.price ?? option.unitPrice ?? 0), group: option.groupName || null,
+    price: Number(item.unitPrice ?? item.price ?? 0),
+    total_price: Number(item.totalPrice ?? item.price ?? 0),
+    notes: item.observations || item.note || null,
+    options: (item.options || []).map((option) => ({
+      name: option.name,
+      quantity: Number(option.quantity || 0),
+      price: Number(option.unitPrice ?? option.price ?? 0),
     })),
   }));
 }
 
-function formatAddress(order) {
-  const a = order?.delivery?.deliveryAddress;
-  if (!a) return null;
-  const first = a.formattedAddress || [a.streetName, a.streetNumber].filter(Boolean).join(', ');
-  return [first, a.neighborhood, a.complement, `${a.city || ''}${a.state ? `/${a.state}` : ''}`, a.postalCode ? `CEP ${a.postalCode}` : ''].filter(Boolean).join(' - ');
+async function getOrderDetail(integration, auth, orderId) {
+  const { response } = await withFreshToken(integration, auth, (token) =>
+    ifoodApiFetch(`${ORDER_BASE}/orders/${encodeURIComponent(orderId)}`, token),
+  );
+  if (response.status === 404) return null;
+  if (!response.ok) throw new Error(`iFood detalhes do pedido (${response.status}): ${await safeText(response)}`);
+  return response.json();
 }
 
-function buildNotes(order) {
-  const parts = [];
-  if (order?.extraInfo) parts.push(order.extraInfo);
-  if (order?.delivery?.observations) parts.push(`Entrega: ${order.delivery.observations}`);
-  if (order?.takeout?.observations) parts.push(`Retirada: ${order.takeout.observations}`);
-  const itemNotes = (Array.isArray(order?.items) ? order.items : []).filter(i => i?.observations).map(i => `${i.name}: ${i.observations}`);
-  if (itemNotes.length) parts.push(`Observações dos itens: ${itemNotes.join(' | ')}`);
-  if (order?.customer?.phone?.localizer) parts.push(`Localizador iFood: ${order.customer.phone.localizer}`);
-  if (order?.delivery?.pickupCode) parts.push(`Código de coleta: ${order.delivery.pickupCode}`);
-
-  const methods = Array.isArray(order?.payments?.methods) ? order.payments.methods : [];
-  const paymentSummary = methods.map(method => {
-    const pieces = [method.method, method.type];
-    if (method?.card?.brand) pieces.push(`bandeira ${method.card.brand}`);
-    if (method?.cash?.changeFor != null) pieces.push(`troco para R$ ${Number(method.cash.changeFor).toFixed(2)}`);
-    return pieces.filter(Boolean).join(' • ');
-  }).filter(Boolean);
-  if (paymentSummary.length) parts.push(`Pagamento iFood: ${paymentSummary.join(' | ')}`);
-
-  const benefits = Array.isArray(order?.benefits) ? order.benefits : [];
-  if (benefits.length) {
-    const benefitText = benefits.map(benefit => {
-      const sponsors = (Array.isArray(benefit?.sponsorshipValues) ? benefit.sponsorshipValues : [])
-        .filter(item => Number(item?.value || 0) > 0)
-        .map(item => `${item.name}: R$ ${Number(item.value).toFixed(2)}`)
-        .join(', ');
-      return `${benefit.target || 'BENEFÍCIO'} R$ ${Number(benefit.value || 0).toFixed(2)}${sponsors ? ` (${sponsors})` : ''}`;
-    });
-    parts.push(`Benefícios iFood: ${benefitText.join(' | ')}`);
-  }
-  return parts.join('\n') || null;
+async function findLocalOrder(integration, auth, platformOrderId) {
+  const rows = await sbGet(
+    `customer_orders?select=*&franchise_id=eq.${encodeURIComponent(integration.franchise_id)}&platform_order_id=eq.${encodeURIComponent(platformOrderId)}&limit=1`,
+    auth.token,
+  );
+  return rows?.[0] || null;
 }
 
-async function supabaseGet(auth, resource, query) {
-  const response = await fetch(`${SUPABASE_URL}/rest/v1/${resource}?${query}`, { headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${auth.token}`, Accept: 'application/json' } });
-  const payload = await readJsonSafe(response);
-  if (!response.ok) throw new Error(ifoodError(payload, `Erro ao consultar ${resource}.`));
-  return payload;
-}
+async function importOrder(integration, auth, detail, event) {
+  const existing = await findLocalOrder(integration, auth, detail.id || event.orderId);
+  if (existing) return { order: existing, imported: false };
 
-async function supabaseInsert(auth, resource, data) {
-  const response = await fetch(`${SUPABASE_URL}/rest/v1/${resource}`, {
-    method: 'POST',
-    headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${auth.token}`, 'Content-Type': 'application/json', Prefer: 'return=representation' },
-    body: JSON.stringify(data),
-  });
-  const payload = await readJsonSafe(response);
-  if (!response.ok) throw new Error(ifoodError(payload, `Erro ao gravar ${resource}.`));
-  return Array.isArray(payload) ? payload[0] : payload;
-}
+  const orderType = String(detail.orderType || '').toUpperCase();
+  const delivery = orderType === 'DELIVERY';
+  const address = detail?.delivery?.deliveryAddress;
+  const totals = detail?.total || {};
+  const payment = detail?.payments?.methods?.[0] || {};
+  const items = mapItems(detail);
+  const notes = [
+    detail.extraInfo,
+    detail?.delivery?.observations,
+    detail?.takeout?.observations,
+    detail?.displayId ? `iFood #${detail.displayId}` : null,
+    detail?.isTest || detail?.test ? 'PEDIDO DE TESTE IFOOD' : null,
+  ].filter(Boolean).join('\n');
 
-async function supabasePatch(auth, resource, query, data) {
-  const response = await fetch(`${SUPABASE_URL}/rest/v1/${resource}?${query}`, {
-    method: 'PATCH',
-    headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${auth.token}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-    body: JSON.stringify(data),
-  });
-  if (!response.ok) {
-    const payload = await readJsonSafe(response);
-    throw new Error(ifoodError(payload, `Erro ao atualizar ${resource}.`));
-  }
-}
-
-async function fetchOrderDetails(orderId, token, integration) {
-  let last = null;
-  for (const delay of [0, 1200, 2500]) {
-    if (delay) await new Promise(resolve => setTimeout(resolve, delay));
-    const response = await fetch(`${IFOOD_BASE}/order/v1.0/orders/${encodeURIComponent(orderId)}`, { headers: authHeaders(token, integration) });
-    const payload = await readJsonSafe(response);
-    if (response.ok) return payload;
-    last = { response, payload };
-    if (response.status !== 404) break;
-  }
-  throw Object.assign(new Error(ifoodError(last?.payload, `Pedido ${orderId} ainda não está disponível no iFood.`)), { status: last?.response?.status || 502, retryable: last?.response?.status === 404 });
-}
-
-async function findLocalOrder(auth, franchiseId, platformOrderId) {
-  const rows = await supabaseGet(auth, 'customer_orders', `select=*&franchise_id=eq.${encodeURIComponent(franchiseId)}&platform_order_id=eq.${encodeURIComponent(platformOrderId)}&limit=1`);
-  return Array.isArray(rows) ? rows[0] : null;
-}
-
-async function importOrder(auth, integration, event, token) {
-  const orderId = event.orderId || event.metadata?.id;
-  if (!orderId) return { processed: true, imported: false, reason: 'Evento sem orderId.' };
-  const existing = await findLocalOrder(auth, integration.franchise_id, orderId);
-  if (existing) return { processed: true, imported: false, order: existing };
-  const order = await fetchOrderDetails(orderId, token, integration);
-  const delivery = String(order.orderType || '').toUpperCase() === 'DELIVERY';
-  const deliveredBy = order?.delivery?.deliveredBy || null;
-  const total = Number(order?.total?.orderAmount ?? 0);
-  const subtotal = Number(order?.total?.subTotal ?? total);
-  const fee = Number(order?.total?.deliveryFee ?? 0);
-  const discount = Number(order?.total?.benefits ?? 0);
-  const row = {
+  const payload = {
     franchise_id: integration.franchise_id,
-    customer_name: safeString(order?.customer?.name || 'Cliente iFood', 180),
-    customer_phone: order?.customer?.phone?.number ? safeString(order.customer.phone.number, 80) : null,
-    items: mapItems(order),
-    total,
+    customer_name: detail?.customer?.name || 'Cliente iFood',
+    customer_phone: customerPhone(detail),
+    items,
+    total: Number(totals.orderAmount ?? 0),
     status: 'pending',
     order_type: 'public',
     delivery,
     delivery_source: 'ifood',
-    delivery_source_detail: safeString(`iFood #${order.displayId || orderId}${deliveredBy ? ` • Entrega: ${deliveredBy}` : ''}${order.isTest || order.test ? ' • TESTE' : ''}`, 500),
-    address: formatAddress(order),
-    notes: buildNotes(order),
+    delivery_source_detail: detail?.delivery?.deliveredBy ? String(detail.delivery.deliveredBy).toUpperCase() : null,
+    address: formatAddress(detail),
+    notes: notes || null,
     order_mode: delivery ? 'delivery' : 'pickup',
-    customer_reference: order?.delivery?.deliveryAddress?.reference || null,
-    payment_method: mapPayment(order),
-    pix_discount_percent: 0,
-    discount_amount: discount,
-    subtotal,
-    delivery_fee: fee,
-    delivery_payment_method: Number(order?.payments?.pending || 0) > 0 ? 'on_delivery' : 'online',
+    customer_reference: address?.reference || null,
+    payment_method: paymentMethodFromOrder(detail),
+    discount_amount: Number(totals.benefits || 0),
+    subtotal: Number(totals.subTotal || 0),
+    delivery_fee: Number(totals.deliveryFee || 0),
+    delivery_payment_method: String(payment.type || '').toUpperCase() === 'ONLINE' ? 'online' : 'on_delivery',
     delivery_fee_payer: 'customer',
-    payer_cpf: order?.customer?.documentNumber ? safeString(order.customer.documentNumber, 40) : null,
-    platform_order_id: orderId,
+    platform_order_id: detail.id || event.orderId,
     ifood_event_id: event.id || null,
+    created_at: detail.createdAt || new Date().toISOString(),
   };
-  const inserted = await supabaseInsert(auth, 'customer_orders', row);
-  await tokenStore().setJSON(`orders/${integration.id}/${orderId}`, order);
-  await logSync(auth, integration.id, 'order_received', 'success', `Pedido iFood #${order.displayId || orderId} importado.`, { event, displayId: order.displayId, deliveredBy, isTest: Boolean(order.isTest || order.test) }, orderId);
-  return { processed: true, imported: true, order: inserted, details: order };
+
+  let inserted;
+  try {
+    inserted = await sbInsert('customer_orders', payload, auth.token);
+  } catch (error) {
+    // Duas abas podem consultar o mesmo evento quase ao mesmo tempo. O índice único
+    // por platform_order_id é a última barreira contra duplicação.
+    const raced = await findLocalOrder(integration, auth, payload.platform_order_id).catch(() => null);
+    if (raced) return { order: raced, imported: false };
+    throw error;
+  }
+
+  try {
+    await sbInsert('sales', {
+      franchise_id: integration.franchise_id,
+      total: Number(totals.orderAmount ?? 0),
+      items_count: items.reduce((sum, item) => sum + Number(item.quantity || 0), 0),
+      sale_type: 'counter',
+      campaign_name: null,
+      items,
+      delivery_source: 'ifood',
+      payment_method: paymentMethodFromOrder(detail),
+      discount: Number(totals.benefits || 0),
+      discount_type: 'fixed',
+      amount_paid: Number(detail?.payments?.prepaid || 0),
+      change: payment?.cash?.changeFor ? Math.max(0, Number(payment.cash.changeFor) - Number(payment.value || 0)) : null,
+      subtotal: Number(totals.subTotal || 0),
+      delivery_fee: Number(totals.deliveryFee || 0),
+      delivery_fee_payer: 'customer',
+      installments: null,
+    }, auth.token);
+  } catch {
+    // O pedido é a fonte operacional. Falha no espelho de relatório não impede o ACK.
+  }
+
+  await insertLog(integration, auth, {
+    action: 'order_received',
+    platformOrderId: payload.platform_order_id,
+    status: 'success',
+    message: `Pedido iFood ${detail.displayId || payload.platform_order_id} importado.`,
+    payload: { displayId: detail.displayId, total: payload.total, isTest: Boolean(detail.isTest || detail.test) },
+  });
+
+  return { order: inserted, imported: true };
 }
 
-function localStatusForEvent(event, source) {
-  const code = String(event?.code || '').toUpperCase();
-  const full = String(event?.fullCode || '').toUpperCase();
-  if (['CAN', 'CANCELLED'].includes(code) || full.includes('CANCELLED')) return 'cancelled';
-  if (['CON', 'CONCLUDED', 'DELIVERED'].includes(code) || full === 'CONCLUDED') return 'delivered';
-  if (['DSP', 'DISPATCHED', 'COLLECTED'].includes(code) || full === 'DISPATCHED') return 'delivering';
-  if (['RTP', 'SPE', 'READY_TO_PICKUP', 'SEPARATION_ENDED'].includes(code) || ['READY_TO_PICKUP', 'PREPARATION_ENDED'].includes(full)) return 'ready';
-  if (['SPS', 'SEPARATION_STARTED', 'PREPARATION_STARTED'].includes(code) || full === 'PREPARATION_STARTED') return 'preparing';
-  if (source === 'events_v1' && ['CFM', 'CONFIRMED'].includes(code)) return 'accepted';
+async function acknowledgeEvents(integration, auth, ids) {
+  if (!ids.length) return;
+  const { response } = await withFreshToken(integration, auth, (token) =>
+    ifoodApiFetch(`${EVENTS_BASE}/events/acknowledgment`, token, {
+      method: 'POST',
+      body: JSON.stringify(ids.map((id) => ({ id }))),
+    }),
+  );
+  if (!response.ok) throw new Error(`iFood ACK (${response.status}): ${await safeText(response)}`);
+}
+
+function localStatusFromEvent(event) {
+  const code = String(event.code || '').toUpperCase();
+  const full = String(event.fullCode || '').toUpperCase();
+  if (code === 'CFM' || full === 'CONFIRMED' || full === 'ORDER_CONFIRMED') return 'accepted';
+  if (code === 'SPS' || full === 'PREPARATION_STARTED' || full === 'SEPARATION_STARTED') return 'preparing';
+  if (code === 'SPE' || full === 'PREPARATION_ENDED' || full === 'SEPARATION_ENDED' || code === 'RTP' || full === 'READY_TO_PICKUP') return 'ready';
+  if (code === 'DSP' || full === 'DISPATCHED') return 'delivering';
+  if (code === 'CON' || full === 'CONCLUDED') return 'delivered';
+  if (code === 'CAN' || full === 'CANCELLED') return 'cancelled';
   return null;
 }
 
-function isNewOrderEvent(event, source) {
-  const code = String(event?.code || '').toUpperCase();
-  const full = String(event?.fullCode || '').toUpperCase();
-  if (source === 'events_v1') return ['PLC', 'PLACED'].includes(code) || full === 'PLACED';
-  return ['CONFIRMED', 'CFM', 'PLC', 'PLACED'].includes(code) || ['ORDER_CONFIRMED', 'PLACED'].includes(full);
-}
+async function processEvent(integration, auth, event) {
+  const code = String(event.code || '').toUpperCase();
+  const fullCode = String(event.fullCode || '').toUpperCase();
+  const isPlaced = code === 'PLC' || fullCode === 'PLACED' || fullCode === 'ORDER_PLACED';
+  const isConfirmed = code === 'CFM' || fullCode === 'CONFIRMED' || fullCode === 'ORDER_CONFIRMED';
+  const orderId = event.orderId || event.metadata?.id;
 
-async function pollEvents(token, integration) {
-  const headers = authHeaders(token, integration, integration.store_id ? { 'x-polling-merchants': integration.store_id } : {});
-  let response = await fetch(`${IFOOD_BASE}/events/v1.0/events:polling?categories=FOOD`, { headers });
-  if (response.status !== 404 && response.status !== 405) {
-    if (response.status === 204) return { source: 'events_v1', events: [] };
-    const payload = await readJsonSafe(response);
-    if (!response.ok) throw Object.assign(new Error(ifoodError(payload, `Polling iFood falhou (${response.status}).`)), { status: response.status });
-    return { source: 'events_v1', events: Array.isArray(payload) ? payload : Array.isArray(payload?.events) ? payload.events : [] };
+  if (!orderId) return { ack: true, imported: false, updated: false, ignored: true };
+
+  let local = await findLocalOrder(integration, auth, orderId);
+  let imported = false;
+
+  if (!local && (isPlaced || isConfirmed)) {
+    const detail = await getOrderDetail(integration, auth, orderId);
+    if (!detail) return { ack: false, retry: true, imported: false, updated: false };
+    const result = await importOrder(integration, auth, detail, event);
+    local = result.order;
+    imported = result.imported;
+
+    if (integration.auto_accept_orders && isPlaced) {
+      try {
+        const actionResult = await performOrderAction(integration, auth, orderId, 'confirm');
+        if (actionResult.ok && local?.id) {
+          await sbPatch('customer_orders', `id=eq.${encodeURIComponent(local.id)}`, { status: 'accepted' }, auth.token);
+        }
+      } catch {
+        // Não bloqueia processamento do pedido. Operador pode aceitar manualmente.
+      }
+    }
   }
-  response = await fetch(`${IFOOD_BASE}/order/v1.0/orders:polling?limit=100`, { headers });
-  if (response.status === 204) return { source: 'order_v1', events: [] };
-  const payload = await readJsonSafe(response);
-  if (!response.ok) throw Object.assign(new Error(ifoodError(payload, `Polling de pedidos iFood falhou (${response.status}).`)), { status: response.status });
-  return { source: 'order_v1', events: Array.isArray(payload) ? payload : Array.isArray(payload?.events) ? payload.events : [] };
-}
 
-async function acknowledgeEvents(token, integration, source, ids) {
-  if (!ids.length) return;
-  if (source === 'events_v1') {
-    const response = await fetch(`${IFOOD_BASE}/events/v1.0/events/acknowledgment`, {
-      method: 'POST', headers: authHeaders(token, integration, { 'Content-Type': 'application/json' }), body: JSON.stringify(ids.map(id => ({ id }))),
-    });
-    if (!response.ok) throw new Error(`iFood não confirmou o ACK dos eventos (${response.status}).`);
-    return;
+  const mapped = localStatusFromEvent(event);
+  let updated = false;
+  if (mapped && local?.id && local.status !== mapped) {
+    await sbPatch('customer_orders', `id=eq.${encodeURIComponent(local.id)}`, { status: mapped }, auth.token);
+    updated = true;
   }
-  const response = await fetch(`${IFOOD_BASE}/order/v1.0/orders:acknowledgment`, {
-    method: 'POST', headers: authHeaders(token, integration, { 'Content-Type': 'application/json' }), body: JSON.stringify({ acknowledgedEventIds: ids }),
-  });
-  if (!response.ok) throw new Error(`iFood não confirmou o ACK dos pedidos (${response.status}).`);
+
+  return { ack: true, imported, updated, ignored: !imported && !updated };
 }
 
-async function processPolling(auth, integration, token) {
-  const { source, events } = await pollEvents(token, integration);
-  const acknowledged = [];
-  let imported = 0, updated = 0, failed = 0;
+async function pollEvents(integration, auth) {
+  if (!integration.enabled) throw new Error('Ative/conecte a integração iFood primeiro.');
+  if (!integration.store_id) throw new Error('Merchant UUID não preenchido.');
+
+  const { response } = await withFreshToken(integration, auth, (token) =>
+    ifoodApiFetch(`${EVENTS_BASE}/events:polling`, token, {
+      headers: { 'x-polling-merchants': integration.store_id },
+    }),
+  );
+
+  if (response.status === 204) {
+    await sbPatch('delivery_integrations', `id=eq.${encodeURIComponent(integration.id)}`, {
+      sync_status: 'connected', last_sync_at: new Date().toISOString(), error_message: null, updated_at: new Date().toISOString(),
+    }, auth.token);
+    return { success: true, events: 0, imported: 0, updated: 0, message: 'Nenhum evento novo no iFood.' };
+  }
+
+  if (!response.ok) throw new Error(`iFood polling (${response.status}): ${await safeText(response)}`);
+  const raw = await response.json().catch(() => []);
+  const events = Array.isArray(raw) ? raw : (Array.isArray(raw?.events) ? raw.events : []);
+  const ackIds = [];
+  let imported = 0;
+  let updated = 0;
+  let retry = 0;
+
   for (const event of events) {
     try {
-      const orderId = event.orderId || event.metadata?.id;
-      if (isNewOrderEvent(event, source)) {
-        const result = await importOrder(auth, integration, event, token);
-        if (result.imported) {
-          imported += 1;
-          if (integration.auto_accept_orders && result.order?.id) {
-            const confirmResponse = await fetch(`${IFOOD_BASE}/order/v1.0/orders/${encodeURIComponent(orderId)}/confirm`, { method: 'POST', headers: authHeaders(token, integration, { 'Content-Type': 'application/json' }) });
-            if (confirmResponse.ok || confirmResponse.status === 202) {
-              await supabasePatch(auth, 'customer_orders', `id=eq.${encodeURIComponent(result.order.id)}`, { status: 'accepted' });
-              await logSync(auth, integration.id, 'order_accept', 'success', 'Pedido confirmado automaticamente no iFood.', { eventId: event.id }, orderId);
-            }
-          }
-        }
-      } else if (orderId) {
-        const local = await findLocalOrder(auth, integration.franchise_id, orderId);
-        const status = localStatusForEvent(event, source);
-        if (local && status && local.status !== status) {
-          await supabasePatch(auth, 'customer_orders', `id=eq.${encodeURIComponent(local.id)}`, { status, ifood_event_id: event.id || local.ifood_event_id || null });
-          updated += 1;
-        }
-      }
-      if (event.id) acknowledged.push(event.id);
+      const result = await processEvent(integration, auth, event);
+      if (result.ack && event.id) ackIds.push(event.id);
+      if (result.imported) imported += 1;
+      if (result.updated) updated += 1;
+      if (result.retry) retry += 1;
     } catch (error) {
-      failed += 1;
-      await logSync(auth, integration.id, 'status_update', 'error', error?.message || 'Falha ao processar evento iFood.', { event }, event.orderId || null);
-      // Não enviar ACK quando o pedido ainda não pôde ser persistido. O iFood reenviará no próximo polling.
+      await insertLog(integration, auth, {
+        action: 'status_update', status: 'error', platformOrderId: event.orderId || null,
+        message: `Erro ao processar evento iFood: ${error.message}`,
+        payload: { eventId: event.id, code: event.code, fullCode: event.fullCode },
+      }).catch(() => undefined);
+      // Sem ACK para este evento: iFood devolve novamente no próximo polling.
     }
   }
-  if (acknowledged.length) await acknowledgeEvents(token, integration, source, acknowledged);
-  await patchIntegration(auth, integration.id, { sync_status: 'connected', enabled: true, last_sync_at: new Date().toISOString(), error_message: null });
-  return { source, received: events.length, acknowledged: acknowledged.length, imported, updated, failed };
+
+  if (ackIds.length) await acknowledgeEvents(integration, auth, ackIds);
+
+  await sbPatch('delivery_integrations', `id=eq.${encodeURIComponent(integration.id)}`, {
+    sync_status: 'connected', last_sync_at: new Date().toISOString(), error_message: null, updated_at: new Date().toISOString(),
+  }, auth.token);
+
+  return {
+    success: true,
+    events: events.length,
+    acknowledged: ackIds.length,
+    imported,
+    updated,
+    retry,
+    message: imported ? `${imported} pedido(s) novo(s) do iFood importado(s).` : `Polling iFood concluído (${events.length} evento(s)).`,
+  };
 }
 
-async function getOrderAndIntegration(event, localOrderId) {
-  const auth = await getSupabaseUser(event);
-  if (!auth) throw Object.assign(new Error('Sessão obrigatória.'), { status: 401 });
-  const rows = await supabaseGet(auth, 'customer_orders', `select=*&id=eq.${encodeURIComponent(localOrderId)}&limit=1`);
-  const order = Array.isArray(rows) ? rows[0] : null;
-  if (!order || order.delivery_source !== 'ifood' || !order.platform_order_id) throw Object.assign(new Error('Pedido iFood não encontrado.'), { status: 404 });
-  const allowed = await authorizeAnalytics(event, order.franchise_id);
-  if (!allowed.ok) throw Object.assign(new Error(allowed.error || 'Sem permissão.'), { status: allowed.status || 403 });
-  const ints = await supabaseGet(auth, 'delivery_integrations', `select=*&franchise_id=eq.${encodeURIComponent(order.franchise_id)}&platform=eq.ifood&limit=1`);
-  const integration = Array.isArray(ints) ? ints[0] : null;
-  if (!integration) throw Object.assign(new Error('Integração iFood não encontrada para a franquia.'), { status: 404 });
-  return { auth, order, integration };
-}
+async function performOrderAction(integration, auth, orderId, action, reason = null) {
+  const pathMap = {
+    confirm: { path: 'confirm', body: null },
+    startPreparation: { path: 'startPreparation', body: null },
+    readyToPickup: { path: 'readyToPickup', body: null },
+    dispatch: { path: 'dispatch', body: { deliveredBy: 'MERCHANT' } },
+    requestCancellation: { path: 'requestCancellation', body: { reason: String(reason || '') } },
+  };
+  const config = pathMap[action];
+  if (!config) throw new Error('Ação iFood inválida.');
+  if (action === 'requestCancellation' && !reason) throw new Error('Escolha um motivo de cancelamento válido do iFood.');
 
-async function performOrderAction(event, body) {
-  const { auth, order, integration } = await getOrderAndIntegration(event, body.order_id);
-  const state = await ensureAccessToken(integration);
-  const token = state.accessToken;
-  const platformOrderId = order.platform_order_id;
-  const operation = body.operation;
-  let endpoint = null, payload = undefined, logAction = 'status_update';
-  if (operation === 'confirm') { endpoint = 'confirm'; logAction = 'order_accept'; }
-  else if (operation === 'start_preparation') endpoint = 'startPreparation';
-  else if (operation === 'ready') endpoint = 'readyToPickup';
-  else if (operation === 'dispatch') {
-    const original = await tokenStore().get(`orders/${integration.id}/${platformOrderId}`, { type: 'json', consistency: 'strong' }).catch(() => null);
-    if (original?.delivery?.deliveredBy === 'IFOOD') {
-      throw Object.assign(new Error('Este pedido usa entrega do iFood. Marque como PRONTO e aguarde o evento de coleta/despacho do iFood.'), { status: 409 });
-    }
-    endpoint = 'dispatch'; payload = { deliveredBy: 'MERCHANT' };
-  } else if (operation === 'cancel') {
-    if (!body.reason) {
-      const reasonsResponse = await fetch(`${IFOOD_BASE}/order/v1.0/orders/${encodeURIComponent(platformOrderId)}/cancellationReasons`, { headers: authHeaders(token, integration) });
-      const reasonsPayload = await readJsonSafe(reasonsResponse);
-      if (!reasonsResponse.ok) throw Object.assign(new Error(ifoodError(reasonsPayload, `Não foi possível obter motivos de cancelamento (${reasonsResponse.status}).`)), { status: reasonsResponse.status });
-      const reasons = Array.isArray(reasonsPayload) ? reasonsPayload : reasonsPayload?.reasons || [];
-      return { requiresReason: true, reasons };
-    }
-    endpoint = 'requestCancellation'; payload = { reason: String(body.reason) }; logAction = 'order_cancel';
-  } else throw Object.assign(new Error('Ação de pedido inválida.'), { status: 400 });
-
-  const response = await fetch(`${IFOOD_BASE}/order/v1.0/orders/${encodeURIComponent(platformOrderId)}/${endpoint}`, {
-    method: 'POST', headers: authHeaders(token, integration, { 'Content-Type': 'application/json' }), body: payload ? JSON.stringify(payload) : undefined,
+  const { response } = await withFreshToken(integration, auth, (token) =>
+    ifoodApiFetch(`${ORDER_BASE}/orders/${encodeURIComponent(orderId)}/${config.path}`, token, {
+      method: 'POST',
+      ...(config.body ? { body: JSON.stringify(config.body) } : {}),
+    }),
+  );
+  if (!response.ok) throw new Error(`iFood ${config.path} (${response.status}): ${await safeText(response)}`);
+  await insertLog(integration, auth, {
+    action: action === 'requestCancellation' ? 'order_cancel' : 'order_accept',
+    platformOrderId: orderId,
+    status: 'success',
+    message: `Ação ${config.path} enviada ao iFood.`,
+    payload: reason ? { reason } : {},
   });
-  const result = await readJsonSafe(response);
-  if (!(response.ok || response.status === 202)) {
-    await logSync(auth, integration.id, logAction, 'error', ifoodError(result, `iFood recusou a ação (${response.status}).`), result || {}, platformOrderId);
-    throw Object.assign(new Error(ifoodError(result, `iFood recusou a ação (${response.status}).`)), { status: response.status });
-  }
-  await logSync(auth, integration.id, logAction, 'success', `Ação ${operation} enviada ao iFood.`, result || {}, platformOrderId);
-  return { success: true, accepted: true, response: result };
+  return { ok: true, status: response.status };
+}
+
+async function cancellationReasons(integration, auth, orderId) {
+  const { response } = await withFreshToken(integration, auth, (token) =>
+    ifoodApiFetch(`${ORDER_BASE}/orders/${encodeURIComponent(orderId)}/cancellationReasons`, token),
+  );
+  if (response.status === 204) return [];
+  if (!response.ok) throw new Error(`iFood cancellationReasons (${response.status}): ${await safeText(response)}`);
+  const data = await response.json().catch(() => []);
+  return Array.isArray(data) ? data : (data?.reasons || []);
 }
 
 export async function handler(event) {
-  if (event.httpMethod === 'OPTIONS') return { statusCode: 204, headers: cors, body: '' };
-  if (event.httpMethod !== 'POST') return json(405, { error: 'Método não permitido.' });
-  try {
-    const body = JSON.parse(event.body || '{}');
-    if (body.action === 'order_action') return json(200, await performOrderAction(event, body));
+  if (event.httpMethod === 'OPTIONS') return json(200, { ok: true });
+  if (event.httpMethod !== 'POST') return json(405, { error: 'Use POST.' });
 
-    const { auth, integration } = await getIntegration(event, body.integration_id);
-    if (body.action === 'generate_user_code') {
-      const code = await requestUserCode(integration);
-      const expiresIn = Number(code.expiresIn || 600);
-      await setOAuthState(integration.id, {
-        ...(await getOAuthState(integration.id) || {}),
-        authorizationCodeVerifier: code.authorizationCodeVerifier,
-        userCode: code.userCode,
-        verificationUrl: code.verificationUrl,
-        verificationUrlComplete: code.verificationUrlComplete,
-        userCodeExpiresAt: Date.now() + expiresIn * 1000,
-      });
-      return json(200, { success: true, userCode: code.userCode, verificationUrl: code.verificationUrl, verificationUrlComplete: code.verificationUrlComplete, expiresIn });
-    }
-    if (body.action === 'authorize') {
-      const current = await getOAuthState(integration.id);
-      const tokenData = await exchangeAuthorizationCode(integration, body.authorization_code, current?.authorizationCodeVerifier);
-      const expiresIn = Math.max(60, Number(tokenData.expiresIn || 0));
-      let state = {
-        ...current,
-        accessToken: tokenData.accessToken,
-        refreshToken: tokenData.refreshToken,
-        tokenType: tokenData.type || 'bearer',
-        tokenExpiresAt: Date.now() + expiresIn * 1000,
-        authorizationCodeVerifier: null,
-        userCode: null,
-        connectedAt: new Date().toISOString(),
+  try {
+    const auth = await getSupabaseUser(event);
+    if (!auth) return json(401, { error: 'Faça login novamente no SuplementaAi.' });
+
+    const body = JSON.parse(event.body || '{}');
+    const action = String(body.action || '');
+    const integrationId = String(body.integration_id || '');
+    if (!integrationId) return json(400, { error: 'integration_id obrigatório.' });
+
+    const integration = await loadIntegration(integrationId, auth);
+
+    if (action === 'generate_user_code') {
+      if (!integration.client_id || !integration.client_secret) return json(400, { error: 'Preencha e salve Client ID e Client Secret completos antes de gerar o vínculo.' });
+      if (!integration.store_id) return json(400, { error: 'Preencha e salve o Merchant UUID da loja de teste antes de gerar o vínculo.' });
+      const data = await ifoodForm('/oauth/userCode', { clientId: integration.client_id });
+      const verifier = data.authorizationCodeVerifier;
+      if (!data.userCode || !verifier) throw new Error('O iFood não retornou userCode/authorizationCodeVerifier.');
+      const previous = await loadOAuthState(integration, auth);
+      const next = {
+        ...(previous || {}),
+        userCode: data.userCode,
+        authorizationCodeVerifier: verifier,
+        verificationUrl: data.verificationUrl || '',
+        verificationUrlComplete: data.verificationUrlComplete || data.verificationUrl || '',
+        userCodeExpiresAt: Date.now() + Number(data.expiresIn || 600) * 1000,
+        disconnected: false,
       };
-      await setOAuthState(integration.id, state);
-      const merchants = await listMerchants(state.accessToken, integration);
-      let storeId = integration.store_id;
-      if ((!storeId || !merchants.some(m => m.id === storeId)) && merchants.length === 1) storeId = merchants[0].id;
-      await patchIntegration(auth, integration.id, { enabled: true, sync_status: 'connected', store_id: storeId || integration.store_id || '', last_sync_at: new Date().toISOString(), error_message: null });
-      return json(200, { success: true, connected: true, merchants, merchantId: storeId || null, expiresIn });
+      await saveOAuthState(integration, auth, next, 'Código de vínculo iFood gerado.');
+      return json(200, {
+        success: true,
+        userCode: data.userCode,
+        verificationUrl: data.verificationUrl,
+        verificationUrlComplete: data.verificationUrlComplete || data.verificationUrl,
+        expiresIn: Number(data.expiresIn || 600),
+      });
     }
-    if (body.action === 'status' || body.action === 'test') {
-      const state = await ensureAccessToken(integration);
-      const merchants = await listMerchants(state.accessToken, integration);
-      return json(200, { success: true, connected: true, merchants, merchantId: integration.store_id || merchants[0]?.id || null, tokenExpiresAt: state.tokenExpiresAt, testMode: isTestIntegration(integration) });
+
+    if (action === 'exchange_code') {
+      if (!integration.client_id || !integration.client_secret) return json(400, { error: 'Salve Client ID e Client Secret completos antes de conectar.' });
+      const authorizationCode = String(body.authorization_code || '').trim();
+      if (!authorizationCode) return json(400, { error: 'Cole o código de autorização mostrado pelo iFood.' });
+      const state = await loadOAuthState(integration, auth);
+      if (!state?.authorizationCodeVerifier) return json(400, { error: 'Gere um novo código de vínculo antes de conectar. O verificador não foi encontrado.' });
+      if (state.userCodeExpiresAt && Number(state.userCodeExpiresAt) < Date.now()) return json(400, { error: 'O código de vínculo expirou. Gere outro e autorize novamente.' });
+
+      const tokenData = await ifoodForm('/oauth/token', {
+        grantType: 'authorization_code',
+        clientId: integration.client_id,
+        clientSecret: integration.client_secret,
+        authorizationCode,
+        authorizationCodeVerifier: state.authorizationCodeVerifier,
+      });
+      const token = normalizeTokenResponse(tokenData);
+      const next = {
+        ...state,
+        ...token,
+        authorizationCodeVerifier: null,
+        authorizationCode: null,
+        connectedAt: new Date().toISOString(),
+        disconnected: false,
+      };
+      await saveOAuthState(integration, auth, next, 'Loja conectada ao iFood com OAuth distribuído.');
+      await sbPatch('delivery_integrations', `id=eq.${encodeURIComponent(integration.id)}`, {
+        enabled: true, sync_status: 'connected', error_message: null, updated_at: new Date().toISOString(),
+      }, auth.token);
+      return json(200, { success: true, connected: true, expiresIn: token.expiresIn, message: 'iFood conectado com sucesso.' });
     }
-    if (body.action === 'poll' || body.action === 'sync') {
-      const state = await ensureAccessToken(integration);
-      const result = await processPolling(auth, integration, state.accessToken);
-      return json(200, { success: true, connected: true, ...result, message: `${result.imported} novo(s) pedido(s) iFood importado(s); ${result.updated} status atualizado(s).` });
+
+    if (action === 'status') {
+      const state = await loadOAuthState(integration, auth);
+      const connected = Boolean(integration.enabled && state?.accessToken && !state?.disconnected);
+      return json(200, {
+        success: true,
+        connected,
+        syncStatus: integration.sync_status,
+        lastSyncAt: integration.last_sync_at,
+        merchantUuid: integration.store_id,
+        expiresAt: connected ? state.expiresAt : null,
+        hasRefreshToken: Boolean(state?.refreshToken),
+      });
     }
-    if (body.action === 'disconnect') {
-      await tokenStore().delete(`integration/${integration.id}`).catch(() => null);
-      await patchIntegration(auth, integration.id, { enabled: false, sync_status: 'disconnected', error_message: null });
+
+    if (action === 'poll') {
+      const result = await pollEvents(integration, auth);
+      return json(200, result);
+    }
+
+    if (action === 'cancellation_reasons') {
+      const orderId = String(body.order_id || '').trim();
+      if (!orderId) return json(400, { error: 'order_id obrigatório.' });
+      const reasons = await cancellationReasons(integration, auth, orderId);
+      return json(200, { success: true, reasons });
+    }
+
+    if (action === 'order_action') {
+      const orderId = String(body.order_id || '').trim();
+      const orderAction = String(body.order_action || '').trim();
+      if (!orderId || !orderAction) return json(400, { error: 'order_id e order_action são obrigatórios.' });
+      const result = await performOrderAction(integration, auth, orderId, orderAction, body.reason);
+      return json(200, { success: true, ...result });
+    }
+
+    if (action === 'disconnect') {
+      const state = await loadOAuthState(integration, auth);
+      await saveOAuthState(integration, auth, { ...(state || {}), accessToken: null, refreshToken: null, disconnected: true, disconnectedAt: new Date().toISOString() }, 'Integração iFood desconectada.');
+      await sbPatch('delivery_integrations', `id=eq.${encodeURIComponent(integration.id)}`, {
+        enabled: false, sync_status: 'disconnected', error_message: null, updated_at: new Date().toISOString(),
+      }, auth.token);
       return json(200, { success: true, connected: false });
     }
+
     return json(400, { error: 'Ação iFood desconhecida.' });
   } catch (error) {
-    const status = Number(error?.status || 500);
-    return json(status, { error: error?.message || 'Erro na integração iFood.', reconnect: Boolean(error?.reconnect), retryable: Boolean(error?.retryable) });
+    return json(500, { error: error?.message || 'Erro inesperado na integração iFood.' });
   }
 }
