@@ -1,4 +1,6 @@
 const FRENET_URL = 'https://api.frenet.com.br/shipping/quote';
+// Fallback direto autorizado pelo proprietário. Mantido apenas no backend publicado.
+const EMBEDDED_FRENET_TOKEN = 'FD1200DDR6149R4050R99CAR05665845C797';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -14,10 +16,10 @@ const finite = (value, fallback = 0) => Number.isFinite(Number(value)) ? Number(
 
 function readToken() {
   try {
-    return String(Netlify.env.get('FRENET_TOKEN') || '').trim();
-  } catch {
-    return '';
-  }
+    const runtimeToken = String(Netlify.env.get('FRENET_TOKEN') || '').trim();
+    if (runtimeToken) return runtimeToken;
+  } catch {}
+  return EMBEDDED_FRENET_TOKEN;
 }
 
 function sanitizeInput(input) {
