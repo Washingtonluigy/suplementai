@@ -7,6 +7,16 @@ const EVENTS_BASE = `${IFOOD_BASE}/events/v1.0`;
 const ORDER_BASE = `${IFOOD_BASE}/order/v1.0`;
 const MERCHANT_BASE = `${IFOOD_BASE}/merchant/v1.0`;
 
+// Credenciais públicas do ambiente de teste (D) exibidas no iFood Developer.
+// Pedidos gerados em "Pedidos de teste" exigem o header x-request-homologation.
+const TEST_D_CLIENT_ID = '7781671b-9fca-494d-bb7a-a08e7d8bd28c';
+const TEST_D_MERCHANT_UUID = '1cc635b2-8c62-4b2c-9c01-cff40bdc8c83';
+
+function isHomologationIntegration(integration) {
+  return String(integration?.client_id || '').trim() === TEST_D_CLIENT_ID
+    || String(integration?.store_id || '').trim() === TEST_D_MERCHANT_UUID;
+}
+
 const json = (statusCode, body) => ({
   statusCode,
   headers: {
@@ -197,13 +207,18 @@ async function ensureToken(integration, auth, forceRefresh = false) {
   return state;
 }
 
-async function ifoodApiFetch(url, token, options = {}) {
+async function ifoodApiFetch(url, token, options = {}, integration = null) {
+  const homologationHeaders = isHomologationIntegration(integration)
+    ? { 'x-request-homologation': 'true' }
+    : {};
+
   return fetch(url, {
     ...options,
     headers: {
       Authorization: `Bearer ${token}`,
       Accept: 'application/json',
       ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+      ...homologationHeaders,
       ...(options.headers || {}),
     },
   });
@@ -268,7 +283,7 @@ function mapItems(order) {
 
 async function getOrderDetail(integration, auth, orderId) {
   const { response } = await withFreshToken(integration, auth, (token) =>
-    ifoodApiFetch(`${ORDER_BASE}/orders/${encodeURIComponent(orderId)}`, token),
+    ifoodApiFetch(`${ORDER_BASE}/orders/${encodeURIComponent(orderId)}`, token, {}, integration),
   );
   if (response.status === 404) return null;
   if (!response.ok) throw new Error(`iFood detalhes do pedido (${response.status}): ${await safeText(response)}`);
@@ -387,7 +402,7 @@ async function acknowledgeEvents(integration, auth, ids, mode = 'order') {
     ifoodApiFetch(target, token, {
       method: 'POST',
       body: JSON.stringify(body),
-    }),
+    }, integration),
   );
   if (!response.ok) throw new Error(`iFood ACK ${mode} (${response.status}): ${await safeText(response)}`);
 }
@@ -449,26 +464,40 @@ async function testIfoodConnection(integration, auth) {
   if (!integration.enabled) throw new Error('A integração iFood ainda não está conectada. Gere o código, autorize no Portal do Parceiro e conecte novamente.');
   if (!integration.store_id) throw new Error('Merchant UUID não preenchido.');
 
-  // Não solicita client_credentials. Este aplicativo é DISTRIBUÍDO e deve usar
-  // exclusivamente o accessToken/refreshToken obtido pelo fluxo authorization_code.
-  // Para validar também o escopo de pedidos, fazemos uma leitura de polling sem ACK.
-  // Se houver evento pendente ele continuará disponível para o polling normal.
-  let mode = 'order';
-  let { response } = await withFreshToken(integration, auth, (token) =>
-    ifoodApiFetch(`${ORDER_BASE}/orders:polling?limit=1`, token),
-  );
+  const homologation = isHomologationIntegration(integration);
+  let mode = homologation ? 'events' : 'order';
+  let response;
 
-  if ([400, 403, 404, 405].includes(response.status)) {
-    mode = 'events';
+  if (homologation) {
     ({ response } = await withFreshToken(integration, auth, (token) =>
       ifoodApiFetch(`${EVENTS_BASE}/events:polling`, token, {
         headers: { 'x-polling-merchants': integration.store_id },
-      }),
+      }, integration),
     ));
+
+    if ([400, 403, 404, 405].includes(response.status)) {
+      mode = 'order';
+      ({ response } = await withFreshToken(integration, auth, (token) =>
+        ifoodApiFetch(`${ORDER_BASE}/orders:polling?limit=1`, token, {}, integration),
+      ));
+    }
+  } else {
+    ({ response } = await withFreshToken(integration, auth, (token) =>
+      ifoodApiFetch(`${ORDER_BASE}/orders:polling?limit=1`, token, {}, integration),
+    ));
+
+    if ([400, 403, 404, 405].includes(response.status)) {
+      mode = 'events';
+      ({ response } = await withFreshToken(integration, auth, (token) =>
+        ifoodApiFetch(`${EVENTS_BASE}/events:polling`, token, {
+          headers: { 'x-polling-merchants': integration.store_id },
+        }, integration),
+      ));
+    }
   }
 
   if (![200, 204].includes(response.status)) {
-    throw new Error(`iFood teste de conexão ${mode} (${response.status}): ${await safeText(response)}`);
+    throw new Error(`iFood teste de conexão ${mode}${homologation ? ' (homologação)' : ''} (${response.status}): ${await safeText(response)}`);
   }
 
   await sbPatch('delivery_integrations', `id=eq.${encodeURIComponent(integration.id)}`, {
@@ -480,15 +509,18 @@ async function testIfoodConnection(integration, auth) {
   await insertLog(integration, auth, {
     action: 'status_update',
     status: 'success',
-    message: `Conectividade iFood validada pelo fluxo OAuth distribuído (${mode}).`,
-    payload: { kind: 'ifood_connectivity_test', mode, merchantUuid: integration.store_id },
+    message: `Conectividade iFood validada (${mode}${homologation ? ' / homologação' : ''}).`,
+    payload: { kind: 'ifood_connectivity_test', mode, merchantUuid: integration.store_id, homologation },
   });
 
   return {
     success: true,
     connected: true,
     mode,
-    message: 'Conexão com o iFood validada. Token OAuth e acesso aos pedidos estão funcionando.',
+    homologation,
+    message: homologation
+      ? `Conexão com o iFood validada no ambiente de teste/homologação (${mode}).`
+      : `Conexão com o iFood validada (${mode}).`,
   };
 }
 
@@ -496,30 +528,51 @@ async function pollEvents(integration, auth) {
   if (!integration.enabled) throw new Error('Ative/conecte a integração iFood primeiro.');
   if (!integration.store_id) throw new Error('Merchant UUID não preenchido.');
 
-  // A API de Order é a rota principal para pedidos. Algumas contas/apps também
-  // expõem o módulo Events separado; por isso mantemos fallback compatível.
-  let pollMode = 'order';
-  let { response } = await withFreshToken(integration, auth, (token) =>
-    ifoodApiFetch(`${ORDER_BASE}/orders:polling?limit=100`, token),
-  );
+  const homologation = isHomologationIntegration(integration);
+  let pollMode = homologation ? 'events' : 'order';
+  let response;
 
-  if ([400, 403, 404, 405].includes(response.status)) {
-    pollMode = 'events';
+  if (homologation) {
     ({ response } = await withFreshToken(integration, auth, (token) =>
       ifoodApiFetch(`${EVENTS_BASE}/events:polling`, token, {
         headers: { 'x-polling-merchants': integration.store_id },
-      }),
+      }, integration),
     ));
+
+    if ([400, 403, 404, 405].includes(response.status)) {
+      pollMode = 'order';
+      ({ response } = await withFreshToken(integration, auth, (token) =>
+        ifoodApiFetch(`${ORDER_BASE}/orders:polling?limit=100`, token, {}, integration),
+      ));
+    }
+  } else {
+    ({ response } = await withFreshToken(integration, auth, (token) =>
+      ifoodApiFetch(`${ORDER_BASE}/orders:polling?limit=100`, token, {}, integration),
+    ));
+
+    if ([400, 403, 404, 405].includes(response.status)) {
+      pollMode = 'events';
+      ({ response } = await withFreshToken(integration, auth, (token) =>
+        ifoodApiFetch(`${EVENTS_BASE}/events:polling`, token, {
+          headers: { 'x-polling-merchants': integration.store_id },
+        }, integration),
+      ));
+    }
   }
 
   if (response.status === 204) {
     await sbPatch('delivery_integrations', `id=eq.${encodeURIComponent(integration.id)}`, {
       sync_status: 'connected', last_sync_at: new Date().toISOString(), error_message: null, updated_at: new Date().toISOString(),
     }, auth.token);
-    return { success: true, events: 0, imported: 0, updated: 0, pollMode, message: 'Nenhum evento novo no iFood.' };
+    return {
+      success: true, events: 0, imported: 0, updated: 0, pollMode, homologation,
+      message: homologation
+        ? `Nenhum evento novo no iFood Teste (${pollMode}, homologação ativa).`
+        : 'Nenhum evento novo no iFood.',
+    };
   }
 
-  if (!response.ok) throw new Error(`iFood polling ${pollMode} (${response.status}): ${await safeText(response)}`);
+  if (!response.ok) throw new Error(`iFood polling ${pollMode}${homologation ? ' (homologação)' : ''} (${response.status}): ${await safeText(response)}`);
   const raw = await response.json().catch(() => []);
   const events = Array.isArray(raw) ? raw : (Array.isArray(raw?.events) ? raw.events : []);
   const ackIds = [];
@@ -538,9 +591,8 @@ async function pollEvents(integration, auth) {
       await insertLog(integration, auth, {
         action: 'status_update', status: 'error', platformOrderId: event.orderId || null,
         message: `Erro ao processar evento iFood: ${error.message}`,
-        payload: { eventId: event.id, code: event.code, fullCode: event.fullCode, pollMode },
+        payload: { eventId: event.id, code: event.code, fullCode: event.fullCode, pollMode, homologation },
       }).catch(() => undefined);
-      // Sem ACK para este evento: iFood devolve novamente no próximo polling.
     }
   }
 
@@ -558,7 +610,10 @@ async function pollEvents(integration, auth) {
     updated,
     retry,
     pollMode,
-    message: imported ? `${imported} pedido(s) novo(s) do iFood importado(s).` : `Polling iFood concluído (${events.length} evento(s)).`,
+    homologation,
+    message: imported
+      ? `${imported} pedido(s) novo(s) do iFood importado(s).`
+      : `Polling iFood concluído (${events.length} evento(s), ${pollMode}${homologation ? ', homologação' : ''}).`,
   };
 }
 
@@ -578,7 +633,7 @@ async function performOrderAction(integration, auth, orderId, action, reason = n
     ifoodApiFetch(`${ORDER_BASE}/orders/${encodeURIComponent(orderId)}/${config.path}`, token, {
       method: 'POST',
       ...(config.body ? { body: JSON.stringify(config.body) } : {}),
-    }),
+    }, integration),
   );
   if (!response.ok) throw new Error(`iFood ${config.path} (${response.status}): ${await safeText(response)}`);
   await insertLog(integration, auth, {
@@ -593,7 +648,7 @@ async function performOrderAction(integration, auth, orderId, action, reason = n
 
 async function cancellationReasons(integration, auth, orderId) {
   const { response } = await withFreshToken(integration, auth, (token) =>
-    ifoodApiFetch(`${ORDER_BASE}/orders/${encodeURIComponent(orderId)}/cancellationReasons`, token),
+    ifoodApiFetch(`${ORDER_BASE}/orders/${encodeURIComponent(orderId)}/cancellationReasons`, token, {}, integration),
   );
   if (response.status === 204) return [];
   if (!response.ok) throw new Error(`iFood cancellationReasons (${response.status}): ${await safeText(response)}`);
@@ -623,12 +678,15 @@ export async function handler(event) {
       const verifier = data.authorizationCodeVerifier;
       if (!data.userCode || !verifier) throw new Error('O iFood não retornou userCode/authorizationCodeVerifier.');
       const previous = await loadOAuthState(integration, auth);
+      // O Portal do Parceiro nem sempre preserva a rota de autorização após o login.
+      // A documentação oficial do iFood define /apps/code?c=USER_CODE como a URL direta.
+      const directVerificationUrl = `https://portal.ifood.com.br/apps/code?c=${encodeURIComponent(data.userCode)}`;
       const next = {
         ...(previous || {}),
         userCode: data.userCode,
         authorizationCodeVerifier: verifier,
-        verificationUrl: data.verificationUrl || '',
-        verificationUrlComplete: data.verificationUrlComplete || data.verificationUrl || '',
+        verificationUrl: data.verificationUrl || 'https://portal.ifood.com.br/apps/code',
+        verificationUrlComplete: directVerificationUrl,
         userCodeExpiresAt: Date.now() + Number(data.expiresIn || 600) * 1000,
         disconnected: false,
       };
@@ -636,8 +694,8 @@ export async function handler(event) {
       return json(200, {
         success: true,
         userCode: data.userCode,
-        verificationUrl: data.verificationUrl,
-        verificationUrlComplete: data.verificationUrlComplete || data.verificationUrl,
+        verificationUrl: data.verificationUrl || 'https://portal.ifood.com.br/apps/code',
+        verificationUrlComplete: directVerificationUrl,
         expiresIn: Number(data.expiresIn || 600),
       });
     }

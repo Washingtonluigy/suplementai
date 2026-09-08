@@ -1,4 +1,4 @@
-SUPLEMENTAAI V24 - IFOOD OAUTH DISTRIBUIDO + TESTE DE CONEXAO
+SUPLEMENTAAI V26 - IFOOD TESTE/HOMOLOGACAO + OAUTH DISTRIBUIDO
 
 A pasta dist gerada por npm run build e um pacote Netlify completo.
 Ela contem:
