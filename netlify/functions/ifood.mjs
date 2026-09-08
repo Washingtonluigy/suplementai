@@ -5,6 +5,7 @@ const IFOOD_BASE = 'https://merchant-api.ifood.com.br';
 const AUTH_BASE = `${IFOOD_BASE}/authentication/v1.0`;
 const EVENTS_BASE = `${IFOOD_BASE}/events/v1.0`;
 const ORDER_BASE = `${IFOOD_BASE}/order/v1.0`;
+const MERCHANT_BASE = `${IFOOD_BASE}/merchant/v1.0`;
 
 const json = (statusCode, body) => ({
   statusCode,
@@ -371,15 +372,24 @@ async function importOrder(integration, auth, detail, event) {
   return { order: inserted, imported: true };
 }
 
-async function acknowledgeEvents(integration, auth, ids) {
+async function acknowledgeEvents(integration, auth, ids, mode = 'order') {
   if (!ids.length) return;
+
+  const target = mode === 'events'
+    ? `${EVENTS_BASE}/events/acknowledgment`
+    : `${ORDER_BASE}/orders:acknowledgment`;
+
+  const body = mode === 'events'
+    ? ids.map((id) => ({ id }))
+    : { acknowledgedEventIds: ids };
+
   const { response } = await withFreshToken(integration, auth, (token) =>
-    ifoodApiFetch(`${EVENTS_BASE}/events/acknowledgment`, token, {
+    ifoodApiFetch(target, token, {
       method: 'POST',
-      body: JSON.stringify(ids.map((id) => ({ id }))),
+      body: JSON.stringify(body),
     }),
   );
-  if (!response.ok) throw new Error(`iFood ACK (${response.status}): ${await safeText(response)}`);
+  if (!response.ok) throw new Error(`iFood ACK ${mode} (${response.status}): ${await safeText(response)}`);
 }
 
 function localStatusFromEvent(event) {
@@ -435,24 +445,81 @@ async function processEvent(integration, auth, event) {
   return { ack: true, imported, updated, ignored: !imported && !updated };
 }
 
+async function testIfoodConnection(integration, auth) {
+  if (!integration.enabled) throw new Error('A integração iFood ainda não está conectada. Gere o código, autorize no Portal do Parceiro e conecte novamente.');
+  if (!integration.store_id) throw new Error('Merchant UUID não preenchido.');
+
+  // Não solicita client_credentials. Este aplicativo é DISTRIBUÍDO e deve usar
+  // exclusivamente o accessToken/refreshToken obtido pelo fluxo authorization_code.
+  // Para validar também o escopo de pedidos, fazemos uma leitura de polling sem ACK.
+  // Se houver evento pendente ele continuará disponível para o polling normal.
+  let mode = 'order';
+  let { response } = await withFreshToken(integration, auth, (token) =>
+    ifoodApiFetch(`${ORDER_BASE}/orders:polling?limit=1`, token),
+  );
+
+  if ([400, 403, 404, 405].includes(response.status)) {
+    mode = 'events';
+    ({ response } = await withFreshToken(integration, auth, (token) =>
+      ifoodApiFetch(`${EVENTS_BASE}/events:polling`, token, {
+        headers: { 'x-polling-merchants': integration.store_id },
+      }),
+    ));
+  }
+
+  if (![200, 204].includes(response.status)) {
+    throw new Error(`iFood teste de conexão ${mode} (${response.status}): ${await safeText(response)}`);
+  }
+
+  await sbPatch('delivery_integrations', `id=eq.${encodeURIComponent(integration.id)}`, {
+    sync_status: 'connected',
+    error_message: null,
+    updated_at: new Date().toISOString(),
+  }, auth.token);
+
+  await insertLog(integration, auth, {
+    action: 'status_update',
+    status: 'success',
+    message: `Conectividade iFood validada pelo fluxo OAuth distribuído (${mode}).`,
+    payload: { kind: 'ifood_connectivity_test', mode, merchantUuid: integration.store_id },
+  });
+
+  return {
+    success: true,
+    connected: true,
+    mode,
+    message: 'Conexão com o iFood validada. Token OAuth e acesso aos pedidos estão funcionando.',
+  };
+}
+
 async function pollEvents(integration, auth) {
   if (!integration.enabled) throw new Error('Ative/conecte a integração iFood primeiro.');
   if (!integration.store_id) throw new Error('Merchant UUID não preenchido.');
 
-  const { response } = await withFreshToken(integration, auth, (token) =>
-    ifoodApiFetch(`${EVENTS_BASE}/events:polling`, token, {
-      headers: { 'x-polling-merchants': integration.store_id },
-    }),
+  // A API de Order é a rota principal para pedidos. Algumas contas/apps também
+  // expõem o módulo Events separado; por isso mantemos fallback compatível.
+  let pollMode = 'order';
+  let { response } = await withFreshToken(integration, auth, (token) =>
+    ifoodApiFetch(`${ORDER_BASE}/orders:polling?limit=100`, token),
   );
+
+  if ([400, 403, 404, 405].includes(response.status)) {
+    pollMode = 'events';
+    ({ response } = await withFreshToken(integration, auth, (token) =>
+      ifoodApiFetch(`${EVENTS_BASE}/events:polling`, token, {
+        headers: { 'x-polling-merchants': integration.store_id },
+      }),
+    ));
+  }
 
   if (response.status === 204) {
     await sbPatch('delivery_integrations', `id=eq.${encodeURIComponent(integration.id)}`, {
       sync_status: 'connected', last_sync_at: new Date().toISOString(), error_message: null, updated_at: new Date().toISOString(),
     }, auth.token);
-    return { success: true, events: 0, imported: 0, updated: 0, message: 'Nenhum evento novo no iFood.' };
+    return { success: true, events: 0, imported: 0, updated: 0, pollMode, message: 'Nenhum evento novo no iFood.' };
   }
 
-  if (!response.ok) throw new Error(`iFood polling (${response.status}): ${await safeText(response)}`);
+  if (!response.ok) throw new Error(`iFood polling ${pollMode} (${response.status}): ${await safeText(response)}`);
   const raw = await response.json().catch(() => []);
   const events = Array.isArray(raw) ? raw : (Array.isArray(raw?.events) ? raw.events : []);
   const ackIds = [];
@@ -471,13 +538,13 @@ async function pollEvents(integration, auth) {
       await insertLog(integration, auth, {
         action: 'status_update', status: 'error', platformOrderId: event.orderId || null,
         message: `Erro ao processar evento iFood: ${error.message}`,
-        payload: { eventId: event.id, code: event.code, fullCode: event.fullCode },
+        payload: { eventId: event.id, code: event.code, fullCode: event.fullCode, pollMode },
       }).catch(() => undefined);
       // Sem ACK para este evento: iFood devolve novamente no próximo polling.
     }
   }
 
-  if (ackIds.length) await acknowledgeEvents(integration, auth, ackIds);
+  if (ackIds.length) await acknowledgeEvents(integration, auth, ackIds, pollMode);
 
   await sbPatch('delivery_integrations', `id=eq.${encodeURIComponent(integration.id)}`, {
     sync_status: 'connected', last_sync_at: new Date().toISOString(), error_message: null, updated_at: new Date().toISOString(),
@@ -490,6 +557,7 @@ async function pollEvents(integration, auth) {
     imported,
     updated,
     retry,
+    pollMode,
     message: imported ? `${imported} pedido(s) novo(s) do iFood importado(s).` : `Polling iFood concluído (${events.length} evento(s)).`,
   };
 }
@@ -619,9 +687,42 @@ export async function handler(event) {
       });
     }
 
+    if (action === 'test_connection') {
+      try {
+        const result = await testIfoodConnection(integration, auth);
+        return json(200, result);
+      } catch (error) {
+        const message = error?.message || 'Falha ao validar a conexão com o iFood.';
+        await sbPatch('delivery_integrations', `id=eq.${encodeURIComponent(integration.id)}`, {
+          sync_status: 'error', error_message: message, updated_at: new Date().toISOString(),
+        }, auth.token).catch(() => undefined);
+        await insertLog(integration, auth, {
+          action: 'status_update',
+          status: 'error',
+          message: `Teste de conectividade iFood falhou: ${message}`,
+          payload: { kind: 'ifood_connectivity_error' },
+        }).catch(() => undefined);
+        throw error;
+      }
+    }
+
     if (action === 'poll') {
-      const result = await pollEvents(integration, auth);
-      return json(200, result);
+      try {
+        const result = await pollEvents(integration, auth);
+        return json(200, result);
+      } catch (error) {
+        const message = error?.message || 'Falha desconhecida no polling do iFood.';
+        await sbPatch('delivery_integrations', `id=eq.${encodeURIComponent(integration.id)}`, {
+          sync_status: 'error', error_message: message, updated_at: new Date().toISOString(),
+        }, auth.token).catch(() => undefined);
+        await insertLog(integration, auth, {
+          action: 'status_update',
+          status: 'error',
+          message: `Polling iFood falhou: ${message}`,
+          payload: { kind: 'ifood_poll_error' },
+        }).catch(() => undefined);
+        throw error;
+      }
     }
 
     if (action === 'cancellation_reasons') {
