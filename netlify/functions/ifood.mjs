@@ -617,33 +617,70 @@ async function pollEvents(integration, auth) {
   };
 }
 
-async function performOrderAction(integration, auth, orderId, action, reason = null) {
+async function performOrderAction(integration, auth, orderId, action, reason = null, cancellationCode = null, cancellationDescription = null) {
   const pathMap = {
     confirm: { path: 'confirm', body: null },
     startPreparation: { path: 'startPreparation', body: null },
     readyToPickup: { path: 'readyToPickup', body: null },
     dispatch: { path: 'dispatch', body: { deliveredBy: 'MERCHANT' } },
-    requestCancellation: { path: 'requestCancellation', body: { reason: String(reason || '') } },
+    requestCancellation: { path: 'requestCancellation', body: null },
   };
   const config = pathMap[action];
   if (!config) throw new Error('Ação iFood inválida.');
-  if (action === 'requestCancellation' && !reason) throw new Error('Escolha um motivo de cancelamento válido do iFood.');
 
-  const { response } = await withFreshToken(integration, auth, (token) =>
+  let requestBody = config.body;
+  if (action === 'requestCancellation') {
+    const code = String(cancellationCode || reason || '').trim();
+    if (!code) throw new Error('Escolha um motivo de cancelamento válido do iFood.');
+
+    // O ambiente de teste/homologação do iFood exige cancellationCode. A documentação
+    // do módulo Order também usa o código em `reason`, então enviamos ambos para manter
+    // compatibilidade entre o ambiente de teste e a API de produção.
+    const cancellationCodeValue = /^\d+$/.test(code) ? Number(code) : code;
+    requestBody = {
+      reason: String(reason || code),
+      cancellationCode: cancellationCodeValue,
+    };
+  }
+
+  let { response } = await withFreshToken(integration, auth, (token) =>
     ifoodApiFetch(`${ORDER_BASE}/orders/${encodeURIComponent(orderId)}/${config.path}`, token, {
       method: 'POST',
-      ...(config.body ? { body: JSON.stringify(config.body) } : {}),
+      ...(requestBody ? { body: JSON.stringify(requestBody) } : {}),
     }, integration),
   );
-  if (!response.ok) throw new Error(`iFood ${config.path} (${response.status}): ${await safeText(response)}`);
+
+  if (!response.ok && action === 'requestCancellation') {
+    const firstError = await safeText(response);
+    // Caso uma futura versão da API rejeite o campo extra, tenta o formato documentado
+    // do módulo Order (somente `reason`) sem mascarar outros erros reais.
+    if (response.status === 400 && /cancellationCode/i.test(firstError) && /(unknown|unexpected|not allowed|not permitted|additional|não permitido|inesperado)/i.test(firstError)) {
+      ({ response } = await withFreshToken(integration, auth, (token) =>
+        ifoodApiFetch(`${ORDER_BASE}/orders/${encodeURIComponent(orderId)}/${config.path}`, token, {
+          method: 'POST',
+          body: JSON.stringify({ reason: String(reason || cancellationCode || '') }),
+        }, integration),
+      ));
+      if (!response.ok) throw new Error(`iFood ${config.path} (${response.status}): ${await safeText(response)}`);
+    } else {
+      throw new Error(`iFood ${config.path} (${response.status}): ${firstError}`);
+    }
+  } else if (!response.ok) {
+    throw new Error(`iFood ${config.path} (${response.status}): ${await safeText(response)}`);
+  }
+
   await insertLog(integration, auth, {
     action: action === 'requestCancellation' ? 'order_cancel' : 'order_accept',
     platformOrderId: orderId,
     status: 'success',
-    message: `Ação ${config.path} enviada ao iFood.`,
-    payload: reason ? { reason } : {},
+    message: action === 'requestCancellation'
+      ? 'Solicitação de cancelamento enviada ao iFood; aguardando evento CANCELLED.'
+      : `Ação ${config.path} enviada ao iFood.`,
+    payload: action === 'requestCancellation'
+      ? { cancellationCode: String(cancellationCode || reason || ''), description: cancellationDescription || null }
+      : (reason ? { reason } : {}),
   });
-  return { ok: true, status: response.status };
+  return { ok: true, status: response.status, pendingConfirmation: action === 'requestCancellation' };
 }
 
 async function cancellationReasons(integration, auth, orderId) {
@@ -653,7 +690,24 @@ async function cancellationReasons(integration, auth, orderId) {
   if (response.status === 204) return [];
   if (!response.ok) throw new Error(`iFood cancellationReasons (${response.status}): ${await safeText(response)}`);
   const data = await response.json().catch(() => []);
-  return Array.isArray(data) ? data : (data?.reasons || []);
+  const rawReasons = Array.isArray(data) ? data : (data?.reasons || []);
+
+  // O iFood pode devolver o código com nomes diferentes entre módulos/ambientes.
+  // Normalizamos antes de mandar ao frontend para nunca exibir uma lista sem código.
+  return rawReasons.map((item) => {
+    if (item == null) return null;
+    if (typeof item !== 'object') {
+      const value = String(item).trim();
+      return value ? { code: value, description: value } : null;
+    }
+    const code = String(
+      item.cancellationCode ?? item.cancelCodeId ?? item.cancelCode ?? item.code ?? item.reason ?? item.id ?? ''
+    ).trim();
+    const description = String(
+      item.description ?? item.message ?? item.title ?? item.reasonDescription ?? 'Motivo iFood'
+    ).trim();
+    return code ? { code, description } : null;
+  }).filter(Boolean);
 }
 
 export async function handler(event) {
@@ -794,7 +848,15 @@ export async function handler(event) {
       const orderId = String(body.order_id || '').trim();
       const orderAction = String(body.order_action || '').trim();
       if (!orderId || !orderAction) return json(400, { error: 'order_id e order_action são obrigatórios.' });
-      const result = await performOrderAction(integration, auth, orderId, orderAction, body.reason);
+      const result = await performOrderAction(
+        integration,
+        auth,
+        orderId,
+        orderAction,
+        body.reason,
+        body.cancellation_code ?? body.cancellationCode,
+        body.cancellation_description,
+      );
       return json(200, { success: true, ...result });
     }
 
