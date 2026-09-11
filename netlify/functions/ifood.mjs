@@ -424,12 +424,46 @@ async function processEvent(integration, auth, event) {
   const fullCode = String(event.fullCode || '').toUpperCase();
   const isPlaced = code === 'PLC' || fullCode === 'PLACED' || fullCode === 'ORDER_PLACED';
   const isConfirmed = code === 'CFM' || fullCode === 'CONFIRMED' || fullCode === 'ORDER_CONFIRMED';
+  const isCancellationRequested = code === 'CAR' || fullCode === 'CANCELLATION_REQUESTED';
+  const isCancellationFailed = code === 'CARF' || fullCode === 'CANCELLATION_REQUEST_FAILED';
+  const isCancelled = code === 'CAN' || fullCode === 'CANCELLED';
   const orderId = event.orderId || event.metadata?.id;
 
   if (!orderId) return { ack: true, imported: false, updated: false, ignored: true };
 
   let local = await findLocalOrder(integration, auth, orderId);
   let imported = false;
+
+  if (isCancellationRequested) {
+    await insertLog(integration, auth, {
+      action: 'order_cancel',
+      platformOrderId: orderId,
+      status: 'success',
+      message: 'iFood recebeu a solicitação de cancelamento; aguardando decisão final.',
+      payload: { eventId: event.id || null, eventCode: code, fullCode, metadata: event.metadata || null },
+    }).catch(() => undefined);
+  }
+
+  if (isCancellationFailed) {
+    const failureReason = String(
+      event?.metadata?.reason
+      ?? event?.metadata?.details
+      ?? event?.metadata?.message
+      ?? 'O iFood recusou a solicitação de cancelamento.'
+    );
+    await insertLog(integration, auth, {
+      action: 'order_cancel',
+      platformOrderId: orderId,
+      status: 'error',
+      message: `Cancelamento recusado pelo iFood: ${failureReason}`,
+      payload: { eventId: event.id || null, eventCode: code, fullCode, metadata: event.metadata || null },
+    }).catch(() => undefined);
+    return {
+      ack: true, imported: false, updated: false, ignored: false,
+      cancellationFailed: true,
+      cancellationFailure: { orderId, reason: failureReason, attemptedReason: event?.metadata?.attemptedReason ?? event?.metadata?.reason_code ?? null },
+    };
+  }
 
   if (!local && (isPlaced || isConfirmed)) {
     const detail = await getOrderDetail(integration, auth, orderId);
@@ -455,6 +489,16 @@ async function processEvent(integration, auth, event) {
   if (mapped && local?.id && local.status !== mapped) {
     await sbPatch('customer_orders', `id=eq.${encodeURIComponent(local.id)}`, { status: mapped }, auth.token);
     updated = true;
+  }
+
+  if (isCancelled) {
+    await insertLog(integration, auth, {
+      action: 'order_cancel',
+      platformOrderId: orderId,
+      status: 'success',
+      message: 'Cancelamento confirmado pelo iFood (evento CANCELLED).',
+      payload: { eventId: event.id || null, eventCode: code, fullCode, metadata: event.metadata || null },
+    }).catch(() => undefined);
   }
 
   return { ack: true, imported, updated, ignored: !imported && !updated };
@@ -579,6 +623,7 @@ async function pollEvents(integration, auth) {
   let imported = 0;
   let updated = 0;
   let retry = 0;
+  const cancellationFailures = [];
 
   for (const event of events) {
     try {
@@ -587,6 +632,7 @@ async function pollEvents(integration, auth) {
       if (result.imported) imported += 1;
       if (result.updated) updated += 1;
       if (result.retry) retry += 1;
+      if (result.cancellationFailed && result.cancellationFailure) cancellationFailures.push(result.cancellationFailure);
     } catch (error) {
       await insertLog(integration, auth, {
         action: 'status_update', status: 'error', platformOrderId: event.orderId || null,
@@ -609,9 +655,12 @@ async function pollEvents(integration, auth) {
     imported,
     updated,
     retry,
+    cancellationFailures,
     pollMode,
     homologation,
-    message: imported
+    message: cancellationFailures.length
+      ? `${cancellationFailures.length} cancelamento(s) recusado(s) pelo iFood. Consulte o motivo exibido no painel.`
+      : imported
       ? `${imported} pedido(s) novo(s) do iFood importado(s).`
       : `Polling iFood concluído (${events.length} evento(s), ${pollMode}${homologation ? ', homologação' : ''}).`,
   };
@@ -629,18 +678,18 @@ async function performOrderAction(integration, auth, orderId, action, reason = n
   if (!config) throw new Error('Ação iFood inválida.');
 
   let requestBody = config.body;
+  let cancellationRequestMode = null;
+  let cancellationResponseBody = null;
   if (action === 'requestCancellation') {
     const code = String(cancellationCode || reason || '').trim();
     if (!code) throw new Error('Escolha um motivo de cancelamento válido do iFood.');
 
-    // O ambiente de teste/homologação do iFood exige cancellationCode. A documentação
-    // do módulo Order também usa o código em `reason`, então enviamos ambos para manter
-    // compatibilidade entre o ambiente de teste e a API de produção.
-    const cancellationCodeValue = /^\d+$/.test(code) ? Number(code) : code;
-    requestBody = {
-      reason: String(reason || code),
-      cancellationCode: cancellationCodeValue,
-    };
+    // ORDER API atual: /requestCancellation recebe SOMENTE o código em `reason`.
+    // Alguns ambientes legados de teste já exigiram `cancellationCode`; por isso o
+    // formato com os dois campos fica apenas como fallback quando a API pedir isso
+    // explicitamente. Assim produção/homologação seguem primeiro o contrato oficial.
+    requestBody = { reason: String(reason || code) };
+    cancellationRequestMode = 'reason_only';
   }
 
   let { response } = await withFreshToken(integration, auth, (token) =>
@@ -652,21 +701,52 @@ async function performOrderAction(integration, auth, orderId, action, reason = n
 
   if (!response.ok && action === 'requestCancellation') {
     const firstError = await safeText(response);
-    // Caso uma futura versão da API rejeite o campo extra, tenta o formato documentado
-    // do módulo Order (somente `reason`) sem mascarar outros erros reais.
-    if (response.status === 400 && /cancellationCode/i.test(firstError) && /(unknown|unexpected|not allowed|not permitted|additional|não permitido|inesperado)/i.test(firstError)) {
+    const code = String(cancellationCode || reason || '').trim();
+
+    // Compatibilidade com ambientes que respondem explicitamente que
+    // `cancellationCode` é obrigatório. Só nesse caso enviamos o formato alternativo.
+    if (response.status === 400 && /cancellationCode/i.test(firstError) && /(required|obrigat|required field|is required)/i.test(firstError)) {
+      const cancellationCodeValue = /^\d+$/.test(code) ? Number(code) : code;
+      cancellationRequestMode = 'reason_and_cancellationCode_fallback';
       ({ response } = await withFreshToken(integration, auth, (token) =>
         ifoodApiFetch(`${ORDER_BASE}/orders/${encodeURIComponent(orderId)}/${config.path}`, token, {
           method: 'POST',
-          body: JSON.stringify({ reason: String(reason || cancellationCode || '') }),
+          body: JSON.stringify({
+            reason: String(reason || code),
+            cancellationCode: cancellationCodeValue,
+          }),
         }, integration),
       ));
-      if (!response.ok) throw new Error(`iFood ${config.path} (${response.status}): ${await safeText(response)}`);
+      if (!response.ok) {
+        const fallbackError = await safeText(response);
+        await insertLog(integration, auth, {
+          action: 'order_cancel',
+          platformOrderId: orderId,
+          status: 'error',
+          message: `iFood recusou a solicitação de cancelamento (${response.status}).`,
+          payload: { requestMode: cancellationRequestMode, code, description: cancellationDescription || null, response: fallbackError },
+        }).catch(() => undefined);
+        throw new Error(`iFood ${config.path} (${response.status}): ${fallbackError}`);
+      }
     } else {
+      await insertLog(integration, auth, {
+        action: 'order_cancel',
+        platformOrderId: orderId,
+        status: 'error',
+        message: `iFood recusou a solicitação de cancelamento (${response.status}).`,
+        payload: { requestMode: cancellationRequestMode, code, description: cancellationDescription || null, response: firstError },
+      }).catch(() => undefined);
       throw new Error(`iFood ${config.path} (${response.status}): ${firstError}`);
     }
   } else if (!response.ok) {
     throw new Error(`iFood ${config.path} (${response.status}): ${await safeText(response)}`);
+  }
+
+  if (action === 'requestCancellation') {
+    cancellationResponseBody = await response.clone().text().catch(() => '');
+    if (response.status === 204) {
+      throw new Error('O iFood não encontrou uma política de cancelamento aplicável para este pedido. Gere um novo pedido de homologação e tente com um motivo retornado pelo próprio iFood.');
+    }
   }
 
   await insertLog(integration, auth, {
@@ -674,10 +754,16 @@ async function performOrderAction(integration, auth, orderId, action, reason = n
     platformOrderId: orderId,
     status: 'success',
     message: action === 'requestCancellation'
-      ? 'Solicitação de cancelamento enviada ao iFood; aguardando evento CANCELLED.'
+      ? `Solicitação de cancelamento aceita pelo iFood (HTTP ${response.status}); aguardando CANCELLED ou CANCELLATION_REQUEST_FAILED.`
       : `Ação ${config.path} enviada ao iFood.`,
     payload: action === 'requestCancellation'
-      ? { cancellationCode: String(cancellationCode || reason || ''), description: cancellationDescription || null }
+      ? {
+          cancellationCode: String(cancellationCode || reason || ''),
+          description: cancellationDescription || null,
+          requestMode: cancellationRequestMode,
+          httpStatus: response.status,
+          response: cancellationResponseBody || null,
+        }
       : (reason ? { reason } : {}),
   });
   return { ok: true, status: response.status, pendingConfirmation: action === 'requestCancellation' };
