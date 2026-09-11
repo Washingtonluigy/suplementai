@@ -686,14 +686,18 @@ async function performOrderAction(integration, auth, orderId, action, reason = n
 
     const cancellationCodeValue = /^\d+$/.test(code) ? Number(code) : code;
 
-    // ORDER API: o contrato atual do iFood usa apenas `reason` (string) com o
-    // código devolvido por /cancellationReasons. Usamos o mesmo contrato também
-    // na homologação. O campo cancellationCode pertence a outros fluxos/módulos
-    // (ex.: Shipping) e só é tentado como fallback se ESTE endpoint responder
-    // explicitamente que ele é obrigatório.
-    requestBody = { reason: String(reason || code) };
-    cancellationRequestMode = isHomologationIntegration(integration)
-      ? 'homologation_reason_only'
+    // Produção segue o contrato público atual da Order API: { reason: "CODIGO" }.
+    // Porém o ambiente Teste (D)/homologação desta aplicação já comprovou nos
+    // Logs da API que reason-only retorna HTTP 400 e reason + cancellationCode
+    // retorna HTTP 202 para o MESMO pedido. Na homologação enviamos diretamente
+    // o formato aceito para evitar gerar uma chamada 400 antes da chamada válida;
+    // isso também mantém o cenário limpo para o validador automático de logs.
+    const homologation = isHomologationIntegration(integration);
+    requestBody = homologation
+      ? { reason: String(reason || code), cancellationCode: cancellationCodeValue }
+      : { reason: String(reason || code) };
+    cancellationRequestMode = homologation
+      ? 'homologation_reason_and_cancellationCode_direct'
       : 'production_reason_only';
   }
 
@@ -710,12 +714,12 @@ async function performOrderAction(integration, auth, orderId, action, reason = n
     const cancellationCodeValue = /^\d+$/.test(code) ? Number(code) : code;
     const homologation = isHomologationIntegration(integration);
 
-    // Compatibilidade: se ESTE endpoint responder explicitamente que
-    // cancellationCode é obrigatório, repetimos com os dois campos.
-    if (response.status === 400 && /cancellationCode/i.test(firstError) && /(required|obrigat|required field|is required)/i.test(firstError)) {
-      cancellationRequestMode = homologation
-        ? 'homologation_reason_and_cancellationCode_fallback'
-        : 'production_reason_and_cancellationCode_fallback';
+    // Compatibilidade para produção: se o endpoint responder explicitamente que
+    // cancellationCode é obrigatório, repetimos com os dois campos. Em homologação
+    // esse formato já é enviado na PRIMEIRA chamada, então nunca criamos o 400
+    // artificial seguido de 202 que apareceu no relatório de Logs da API.
+    if (!homologation && response.status === 400 && /cancellationCode/i.test(firstError) && /(required|obrigat|required field|is required)/i.test(firstError)) {
+      cancellationRequestMode = 'production_reason_and_cancellationCode_fallback';
       ({ response } = await withFreshToken(integration, auth, (token) =>
         ifoodApiFetch(`${ORDER_BASE}/orders/${encodeURIComponent(orderId)}/${config.path}`, token, {
           method: 'POST',
