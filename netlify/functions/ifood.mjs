@@ -415,7 +415,7 @@ function localStatusFromEvent(event) {
   if (code === 'SPE' || full === 'PREPARATION_ENDED' || full === 'SEPARATION_ENDED' || code === 'RTP' || full === 'READY_TO_PICKUP') return 'ready';
   if (code === 'DSP' || full === 'DISPATCHED') return 'delivering';
   if (code === 'CON' || full === 'CONCLUDED') return 'delivered';
-  if (code === 'CAN' || full === 'CANCELLED') return 'cancelled';
+  if (code === 'CAN' || code === 'CANCELLED' || code === 'ORDER_CANCELLED' || full === 'CANCELLED' || full === 'ORDER_CANCELLED') return 'cancelled';
   return null;
 }
 
@@ -424,9 +424,9 @@ async function processEvent(integration, auth, event) {
   const fullCode = String(event.fullCode || '').toUpperCase();
   const isPlaced = code === 'PLC' || fullCode === 'PLACED' || fullCode === 'ORDER_PLACED';
   const isConfirmed = code === 'CFM' || fullCode === 'CONFIRMED' || fullCode === 'ORDER_CONFIRMED';
-  const isCancellationRequested = code === 'CAR' || fullCode === 'CANCELLATION_REQUESTED';
-  const isCancellationFailed = code === 'CARF' || fullCode === 'CANCELLATION_REQUEST_FAILED';
-  const isCancelled = code === 'CAN' || fullCode === 'CANCELLED';
+  const isCancellationRequested = code === 'CAR' || code === 'CANCELLATION_REQUESTED' || fullCode === 'CANCELLATION_REQUESTED' || fullCode === 'ORDER_CANCELLATION_REQUESTED';
+  const isCancellationFailed = code === 'CARF' || code === 'CANCELLATION_REQUEST_FAILED' || fullCode === 'CANCELLATION_REQUEST_FAILED' || fullCode === 'ORDER_CANCELLATION_REQUEST_FAILED';
+  const isCancelled = code === 'CAN' || code === 'CANCELLED' || code === 'ORDER_CANCELLED' || fullCode === 'CANCELLED' || fullCode === 'ORDER_CANCELLED';
   const orderId = event.orderId || event.metadata?.id;
 
   if (!orderId) return { ack: true, imported: false, updated: false, ignored: true };
@@ -686,21 +686,15 @@ async function performOrderAction(integration, auth, orderId, action, reason = n
 
     const cancellationCodeValue = /^\d+$/.test(code) ? Number(code) : code;
 
-    // A Order API de produção documenta o código no campo `reason`.
-    // Porém o ambiente Teste (D)/homologação usado neste projeto já respondeu
-    // explicitamente que `cancellationCode` é obrigatório, e foi justamente o
-    // formato reason + cancellationCode que cancelou com sucesso nos testes anteriores.
-    // Portanto: homologação envia ambos; produção continua no contrato oficial.
-    if (isHomologationIntegration(integration)) {
-      requestBody = {
-        reason: String(reason || code),
-        cancellationCode: cancellationCodeValue,
-      };
-      cancellationRequestMode = 'homologation_reason_and_cancellationCode';
-    } else {
-      requestBody = { reason: String(reason || code) };
-      cancellationRequestMode = 'production_reason_only';
-    }
+    // ORDER API: o contrato atual do iFood usa apenas `reason` (string) com o
+    // código devolvido por /cancellationReasons. Usamos o mesmo contrato também
+    // na homologação. O campo cancellationCode pertence a outros fluxos/módulos
+    // (ex.: Shipping) e só é tentado como fallback se ESTE endpoint responder
+    // explicitamente que ele é obrigatório.
+    requestBody = { reason: String(reason || code) };
+    cancellationRequestMode = isHomologationIntegration(integration)
+      ? 'homologation_reason_only'
+      : 'production_reason_only';
   }
 
   let { response } = await withFreshToken(integration, auth, (token) =>
@@ -716,10 +710,12 @@ async function performOrderAction(integration, auth, orderId, action, reason = n
     const cancellationCodeValue = /^\d+$/.test(code) ? Number(code) : code;
     const homologation = isHomologationIntegration(integration);
 
-    // Produção: se a API pedir cancellationCode explicitamente, tenta o formato
-    // compatível com o ambiente legado/teste.
-    if (!homologation && response.status === 400 && /cancellationCode/i.test(firstError) && /(required|obrigat|required field|is required)/i.test(firstError)) {
-      cancellationRequestMode = 'production_reason_and_cancellationCode_fallback';
+    // Compatibilidade: se ESTE endpoint responder explicitamente que
+    // cancellationCode é obrigatório, repetimos com os dois campos.
+    if (response.status === 400 && /cancellationCode/i.test(firstError) && /(required|obrigat|required field|is required)/i.test(firstError)) {
+      cancellationRequestMode = homologation
+        ? 'homologation_reason_and_cancellationCode_fallback'
+        : 'production_reason_and_cancellationCode_fallback';
       ({ response } = await withFreshToken(integration, auth, (token) =>
         ifoodApiFetch(`${ORDER_BASE}/orders/${encodeURIComponent(orderId)}/${config.path}`, token, {
           method: 'POST',
@@ -729,17 +725,8 @@ async function performOrderAction(integration, auth, orderId, action, reason = n
           }),
         }, integration),
       ));
-    // Homologação: se algum backend novo rejeitar o campo extra, tenta o contrato
-    // atual documentado do módulo Order, apenas com `reason`.
-    } else if (homologation && response.status === 400 && /cancellationCode/i.test(firstError) && /(unknown|unexpected|not allowed|not permitted|additional|n[aã]o permitido|inesperado)/i.test(firstError)) {
-      cancellationRequestMode = 'homologation_reason_only_fallback';
-      ({ response } = await withFreshToken(integration, auth, (token) =>
-        ifoodApiFetch(`${ORDER_BASE}/orders/${encodeURIComponent(orderId)}/${config.path}`, token, {
-          method: 'POST',
-          body: JSON.stringify({ reason: String(reason || code) }),
-        }, integration),
-      ));
     }
+
 
     if (!response.ok) {
       const finalError = response.bodyUsed ? firstError : await safeText(response);
