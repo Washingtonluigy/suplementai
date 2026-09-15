@@ -245,19 +245,66 @@ export async function handler(event) {
       const logs = await sbGet(`delivery_sync_logs?select=*&integration_id=eq.${encodeURIComponent(integrationId)}&action=eq.menu_sync&order=created_at.desc&limit=10`, auth.token);
       const latest = Array.isArray(logs) ? logs.find(row => row?.payload?.provider === '99food') : null;
       const payload = latest?.payload || {};
+      const taskId = String(payload.task_id || payload.taskId || '').trim();
       const blob = await latestBlobStatus({
         integrationId,
-        taskId: payload.task_id || payload.taskId || '',
+        taskId,
         shopId: integration.store_id || '',
         appShopId: integration.food99?.appShopId || '',
       });
+
+      // V39: não dependemos mais do callback para descobrir o resultado do upload.
+      // Consultamos diretamente a API oficial Get Menu Upload Task Info.
+      let remoteTask = null;
+      let remoteError = null;
+      if (latest && taskId) {
+        try {
+          const authInfo = await getValidFood99AuthToken(integration, auth);
+          const variants = [
+            ['task_id', taskId],
+            ['taskId', taskId],
+            ['taskID', taskId],
+          ];
+          for (const [taskKey, taskValue] of variants) {
+            const params = new URLSearchParams({ auth_token: authInfo.token });
+            params.set(taskKey, taskValue);
+            const response = await fetch(`https://openapi.99food.com/v1/item/item/getMenuTaskInfo?${params.toString()}`, {
+              method: 'GET',
+              headers: { Accept: 'application/json', 'Cache-Control': 'no-cache' },
+            });
+            const raw = await response.text();
+            let data = {};
+            try { data = raw ? JSON.parse(raw) : {}; } catch { data = { raw }; }
+            // errno 10002 costuma indicar nome/formato de parâmetro inválido; tenta a próxima variante.
+            if (response.ok && Number(data?.errno ?? -1) === 0) {
+              remoteTask = data;
+              break;
+            }
+            remoteError = data?.errmsg || data?.message || `99Food Task HTTP ${response.status}`;
+            if (Number(data?.errno ?? -1) !== 10002) break;
+          }
+        } catch (error) {
+          remoteError = error instanceof Error ? error.message : String(error);
+        }
+      }
+
+      const remoteStatusRaw = remoteTask?.data?.status ?? remoteTask?.data?.taskStatus ?? remoteTask?.data?.task_status;
+      const remoteStatus = remoteTask ? normalizeTaskStatus(remoteStatusRaw) : 'unknown';
+      const resolvedStatus = remoteStatus !== 'unknown'
+        ? remoteStatus
+        : (blob?.status || payload.status || (latest?.status === 'success' ? 'waiting' : 'failed'));
+
       return json(200, {
         ok: true,
         mapping: latest ? {
           app_item_id: payload.app_item_id || payload.appItemId || '',
-          task_id: payload.task_id || payload.taskId || null,
-          sync_status: blob?.status || payload.status || (latest.status === 'success' ? 'waiting' : 'failed'),
+          task_id: taskId || null,
+          sync_status: resolvedStatus,
           callback: blob || null,
+          remote_task: remoteTask,
+          remote_error: remoteError,
+          remote_message: remoteTask?.data?.message || remoteTask?.errmsg || null,
+          remote_details: remoteTask?.data || null,
         } : null,
       });
     }

@@ -1,4 +1,4 @@
-SUPLEMENTAAI V36 - IFOOD + 99FOOD SEM ALTERAR O SUPABASE
+SUPLEMENTAAI V38 - 99FOOD TOKEN AUTOMATICO - SEM ALTERAR O SUPABASE
 
 A pasta dist gerada por npm run build e um pacote Netlify completo.
 Ela contem:
@@ -20,7 +20,8 @@ PUBLICACAO
 99FOOD
 - Para compatibilidade com o banco ja existente, a 99Food reutiliza internamente o slot legado 99delivery.
 - A interface mostra esse slot como 99Food.
-- APP ID, Secret, Shop ID, AppShopID e Auth Token sao salvos usando apenas os campos ja existentes.
+- APP ID, Secret, Shop ID e AppShopID usam apenas os campos ja existentes.
+- O Auth Token NAO precisa ser colado manualmente: a Netlify Function usa auth/get e auth/refresh automaticamente.
 - O upload de menu e feito pela Netlify Function food99.mjs.
 - O webhook e uma Netlify Function e sera publicado junto com a dist.
 - Depois do deploy, copie em Integracoes > 99Food a URL exibida e cadastre/atualize o webhook no portal 99Food.
