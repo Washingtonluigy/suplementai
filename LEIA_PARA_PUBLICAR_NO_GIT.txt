@@ -1,34 +1,32 @@
-SUPLEMENTAAI V26 - IFOOD TESTE/HOMOLOGACAO + OAUTH DISTRIBUIDO
+SUPLEMENTAAI V36 - IFOOD + 99FOOD SEM ALTERAR O SUPABASE
 
 A pasta dist gerada por npm run build e um pacote Netlify completo.
 Ela contem:
 - site/ -> frontend pronto
-- netlify/functions/ifood.mjs -> OAuth, polling e status do iFood
-- netlify/functions/ -> Analytics e acompanhamento ja existentes
-- netlify/edge-functions/ -> cotacao Frenet ja existente
+- netlify/functions/ifood.mjs -> integracao iFood
+- netlify/functions/food99.mjs -> chamadas da API 99Food
+- netlify/functions/food99-webhook.mjs -> webhook 99Food
+- demais Netlify Functions ja existentes
 - netlify.toml -> configuracao automatica do Netlify
-- package.json -> dependencias das outras Functions existentes
+- package.json -> dependencias necessarias, inclusive Netlify Blobs
 
 PUBLICACAO
 1. Rode npm run build.
-2. Use O CONTEUDO DA PASTA dist como raiz do repositorio Git, como nas versoes anteriores.
-3. Na raiz do Git devem aparecer: site, netlify, netlify.toml e package.json.
-4. Espere o Netlify publicar.
+2. Publique O CONTEUDO DA PASTA dist exatamente como nas versoes anteriores.
+3. Nao rode supabase db push.
+4. Nao publique Supabase Edge Functions.
+5. Nao precisa abrir/configurar o Supabase para a 99Food.
 
-IFOOD - PRIMEIRO TESTE
-1. Entre em Franqueado > Integracoes > iFood.
-2. Use Preencher Teste (D).
-3. Cole o Client Secret COMPLETO do portal iFood, informe o Merchant UUID da loja de teste e salve.
-4. Clique Gerar codigo iFood.
-5. Abra o Portal do Parceiro pelo botao, autorize o aplicativo e copie o authorizationCode.
-6. Cole o authorizationCode no sistema e clique Conectar iFood.
-7. Depois, no portal iFood Developer, gere um pedido de teste.
-8. O painel consulta eventos automaticamente a cada 30 segundos. Tambem existe Buscar pedidos agora.
+99FOOD
+- Para compatibilidade com o banco ja existente, a 99Food reutiliza internamente o slot legado 99delivery.
+- A interface mostra esse slot como 99Food.
+- APP ID, Secret, Shop ID, AppShopID e Auth Token sao salvos usando apenas os campos ja existentes.
+- O upload de menu e feito pela Netlify Function food99.mjs.
+- O webhook e uma Netlify Function e sera publicado junto com a dist.
+- Depois do deploy, copie em Integracoes > 99Food a URL exibida e cadastre/atualize o webhook no portal 99Food.
+- A URL tera o formato https://SEU-SITE.netlify.app/.netlify/functions/food99-webhook
 
 IMPORTANTE
-- A integracao iFood V24 NAO usa Netlify Blobs.
-- O iFood e aplicativo distribuido: NAO use client_credentials; use authorization_code e refresh_token.
-- Nao precisa configurar Site ID, token do Netlify Blobs ou comandos extras para o iFood.
-- OAuth/token iFood sao persistidos criptografados usando as tabelas de integracao que o projeto ja possui.
-- Nao foi criada migration nova nem tabela nova.
-- Antes de producao, o aplicativo Farm Tecnologia ainda precisa passar pela homologacao do iFood.
+- Nao foi criada migration nova para a 99Food nesta versao.
+- Nao ha dependencia de Supabase Edge Function para a 99Food.
+- O iFood permanece sem alteracoes funcionais nesta versao.
