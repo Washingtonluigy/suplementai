@@ -193,6 +193,19 @@ function normalizeTaskStatus(value) {
   return 'unknown';
 }
 
+// IDs da 99Food (taskID, shopID etc.) são inteiros de 64 bits e podem ultrapassar
+// Number.MAX_SAFE_INTEGER. JSON.parse() arredonda esses valores em JavaScript.
+// Para taskID, preservamos os dígitos diretamente do JSON bruto antes de converter.
+function extractExactIntegerField(rawJson, fieldNames = []) {
+  const raw = String(rawJson || '');
+  for (const name of fieldNames) {
+    const rx = new RegExp('"' + String(name) + '"\\s*:\s*(?:"([0-9]+)"|([0-9]+))');
+    const match = raw.match(rx);
+    if (match) return String(match[1] || match[2] || '').trim();
+  }
+  return '';
+}
+
 async function latestBlobStatus({ integrationId, taskId, shopId, appShopId }) {
   try {
     const store = getStore({ name: 'suplementaai-99food', consistency: 'strong' });
@@ -260,11 +273,14 @@ export async function handler(event) {
       if (latest && taskId) {
         try {
           const authInfo = await getValidFood99AuthToken(integration, auth);
+          // Documentação/integrações públicas usam taskID. Na V40 usamos taskID primeiro e
+          // não escondemos a resposta de erro. task_id/taskId ficam apenas como fallback.
           const variants = [
-            ['task_id', taskId],
-            ['taskId', taskId],
             ['taskID', taskId],
+            ['taskId', taskId],
+            ['task_id', taskId],
           ];
+          const attempts = [];
           for (const [taskKey, taskValue] of variants) {
             const params = new URLSearchParams({ auth_token: authInfo.token });
             params.set(taskKey, taskValue);
@@ -275,13 +291,15 @@ export async function handler(event) {
             const raw = await response.text();
             let data = {};
             try { data = raw ? JSON.parse(raw) : {}; } catch { data = { raw }; }
-            // errno 10002 costuma indicar nome/formato de parâmetro inválido; tenta a próxima variante.
+            attempts.push({ taskKey, httpStatus: response.status, data, raw });
             if (response.ok && Number(data?.errno ?? -1) === 0) {
               remoteTask = data;
               break;
             }
             remoteError = data?.errmsg || data?.message || `99Food Task HTTP ${response.status}`;
-            if (Number(data?.errno ?? -1) !== 10002) break;
+          }
+          if (!remoteTask && attempts.length) {
+            remoteError = `${remoteError || 'Falha ao consultar tarefa'} | tentativas: ${attempts.map(a => `${a.taskKey}:${a.httpStatus}/errno=${a.data?.errno ?? '?'}/${a.data?.errmsg || a.data?.message || 'sem mensagem'}`).join(' ; ')}`;
           }
         } catch (error) {
           remoteError = error instanceof Error ? error.message : String(error);
@@ -305,6 +323,8 @@ export async function handler(event) {
           remote_error: remoteError,
           remote_message: remoteTask?.data?.message || remoteTask?.errmsg || null,
           remote_details: remoteTask?.data || null,
+          task_id_safe_integer: taskId ? /^\d+$/.test(taskId) && Number(taskId) <= Number.MAX_SAFE_INTEGER : null,
+          direct_query_ok: Boolean(remoteTask),
         } : null,
       });
     }
@@ -377,7 +397,11 @@ export async function handler(event) {
       return json(400, { ok: false, error: remote?.errmsg || remote?.message || `99Food respondeu HTTP ${response.status}.`, remote, appItemId });
     }
 
-    const taskId = String(remote?.data?.taskID ?? remote?.data?.taskId ?? '');
+    // IMPORTANT: taskID é uint64 e normalmente > Number.MAX_SAFE_INTEGER.
+    // Extrair do texto bruto evita arredondamento silencioso do JSON.parse().
+    const exactTaskId = extractExactIntegerField(raw, ['taskID', 'taskId', 'task_id']);
+    const parsedTaskId = remote?.data?.taskID ?? remote?.data?.taskId ?? remote?.data?.task_id ?? '';
+    const taskId = exactTaskId || String(parsedTaskId || '');
     const initialStatus = normalizeTaskStatus(remote?.data?.status ?? 0);
     await sbInsert('delivery_sync_logs', {
       integration_id: integrationId,
