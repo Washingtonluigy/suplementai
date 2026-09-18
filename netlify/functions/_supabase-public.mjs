@@ -14,10 +14,10 @@ export async function getSupabaseUser(event) {
 export async function authorizeAnalytics(event, franchiseId) {
   const auth = await getSupabaseUser(event);
   if (!auth) return { ok: false, status: 401, error: 'Sessão obrigatória.' };
-  if (auth.user?.user_metadata?.role === 'master') return { ok: true, master: true, token: auth.token, user: auth.user };
+  if (auth.user?.user_metadata?.role === 'master') return { ok: true, master: true };
   const response = await fetch(`${SUPABASE_URL}/rest/v1/franchise_users?select=franchise_id&auth_user_id=eq.${encodeURIComponent(auth.user.id)}&limit=1`, { headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${auth.token}`, Accept: 'application/json' } });
   const rows = await response.json().catch(() => []);
   const ownId = Array.isArray(rows) ? rows[0]?.franchise_id : null;
   if (!ownId || String(ownId) !== String(franchiseId)) return { ok: false, status: 403, error: 'Sem permissão para estas métricas.' };
-  return { ok: true, master: false, token: auth.token, user: auth.user };
+  return { ok: true, master: false };
 }

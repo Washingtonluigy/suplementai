@@ -1,4 +1,4 @@
-SUPLEMENTAAI V43 - FISCAL + RELATORIOS + CORRECAO DE VENDAS - SEM ALTERAR O SUPABASE
+SUPLEMENTAAI V38 - 99FOOD TOKEN AUTOMATICO - SEM ALTERAR O SUPABASE
 
 A pasta dist gerada por npm run build e um pacote Netlify completo.
 Ela contem:
@@ -28,9 +28,6 @@ PUBLICACAO
 - A URL tera o formato https://SEU-SITE.netlify.app/.netlify/functions/food99-webhook
 
 IMPORTANTE
-- Nao foi criada migration nova nesta versao.
-- Nao e necessario abrir nem alterar o Supabase.
-- O iFood e a 99Food permanecem com as integracoes ja existentes.
-- O Master agora exibe acesso direto a Fiscal e Tributario e Relatorios da Rede.
-- Cada unidade possui Fiscal e Tributario no menu lateral.
-- Vendas manuais podem ser corrigidas/excluidas no Relatorio da unidade com a senha edita10.
+- Nao foi criada migration nova para a 99Food nesta versao.
+- Nao ha dependencia de Supabase Edge Function para a 99Food.
+- O iFood permanece sem alteracoes funcionais nesta versao.
