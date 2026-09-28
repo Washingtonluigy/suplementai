@@ -130,8 +130,14 @@ export const handler = async (event) => {
 
     if (!franchiseId) return json(400, { success: false, error: 'franchise_id não informado.' });
 
-    const auth = await authorizeAnalytics(event, franchiseId);
-    if (!auth.ok) return json(auth.status || 403, { success: false, error: auth.error || 'Sessão sem permissão para esta unidade.' });
+    // A cotação de entrega é usada também no catálogo público, onde o cliente
+    // não possui sessão do painel. Somente essa ação pode ser chamada sem login.
+    // As ações administrativas/operacionais (teste, listar, criar corrida,
+    // rastreio interno, cancelamento etc.) continuam exigindo sessão autorizada.
+    if (action !== 'quote') {
+      const auth = await authorizeAnalytics(event, franchiseId);
+      if (!auth.ok) return json(auth.status || 403, { success: false, error: auth.error || 'Sessão sem permissão para esta unidade.' });
+    }
 
     const basicAuth = payload?.basic_auth
       ? { username: String(payload.basic_auth.username || '').trim(), password: String(payload.basic_auth.password ?? '') }
