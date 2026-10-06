@@ -13,8 +13,11 @@ const TEST_D_CLIENT_ID = '7781671b-9fca-494d-bb7a-a08e7d8bd28c';
 const TEST_D_MERCHANT_UUID = '1cc635b2-8c62-4b2c-9c01-cff40bdc8c83';
 
 function isHomologationIntegration(integration) {
-  return String(integration?.client_id || '').trim() === TEST_D_CLIENT_ID
-    || String(integration?.store_id || '').trim() === TEST_D_MERCHANT_UUID;
+  // O ambiente de homologação é determinado pela credencial do aplicativo Teste (D).
+  // Nunca use o Merchant UUID isoladamente para ativar x-request-homologation:
+  // um usuário pode estar cadastrando uma loja real/produtiva e ainda ter deixado
+  // um UUID antigo no campo. Isso misturava produção com homologação.
+  return String(integration?.client_id || '').trim() === TEST_D_CLIENT_ID;
 }
 
 const json = (statusCode, body) => ({
@@ -155,20 +158,44 @@ async function saveOAuthState(integration, auth, state, message) {
   });
 }
 
+function normalizeIfoodCredential(value) {
+  return String(value ?? '')
+    .trim()
+    .replace(/^([\"'`])|([\"'`])$/g, '');
+}
+
 async function ifoodForm(path, form) {
+  const normalizedForm = Object.fromEntries(
+    Object.entries(form).map(([key, value]) => [key, normalizeIfoodCredential(value)]),
+  );
   const response = await fetch(`${AUTH_BASE}${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
-    body: new URLSearchParams(form),
+    body: new URLSearchParams(normalizedForm),
   });
   const text = await response.text();
   let data = null;
   try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
   if (!response.ok) {
-    const message = data?.error?.message || data?.message || data?.error_description || text || `HTTP ${response.status}`;
-    throw new Error(`iFood: ${message}`);
+    const code = data?.error?.code || data?.error || '';
+    const message = data?.error?.message || data?.message || data?.error_description || data?.error?.description || text || `HTTP ${response.status}`;
+    const invalidSecret = /invalid client secret|client secret/i.test(String(message));
+    if (invalidSecret) {
+      throw new Error(
+        'iFood: Invalid client secret. O Client ID foi aceito, mas o Client Secret enviado ao /oauth/token foi rejeitado. Verifique se o Secret pertence ao MESMO aplicativo deste Client ID, se não foi regenerado no Developers e se você gerou um NOVO código de vínculo depois de salvar as credenciais.'
+        + (code ? ` Código: ${code}.` : ''),
+      );
+    }
+    throw new Error(`iFood: ${message}${code ? ` [${code}]` : ''}`);
   }
   return data || {};
+}
+
+async function listAuthorizedMerchants(integration, auth, token) {
+  const response = await ifoodApiFetch(`${MERCHANT_BASE}/merchants?page=1&size=100`, token, {}, integration);
+  if (!response.ok) return [];
+  const data = await response.json().catch(() => []);
+  return Array.isArray(data) ? data : (Array.isArray(data?.merchants) ? data.merchants : []);
 }
 
 function normalizeTokenResponse(data, previousRefreshToken = '') {
@@ -818,7 +845,8 @@ export async function handler(event) {
 
     if (action === 'generate_user_code') {
       if (!integration.client_id || !integration.client_secret) return json(400, { error: 'Preencha e salve Client ID e Client Secret completos antes de gerar o vínculo.' });
-      if (!integration.store_id) return json(400, { error: 'Preencha e salve o Merchant UUID da loja de teste antes de gerar o vínculo.' });
+      // Merchant UUID não participa da criação do userCode. Ele só é necessário
+      // nas chamadas de Merchant/Pedidos depois que o OAuth já foi concluído.
       const data = await ifoodForm('/oauth/userCode', { clientId: integration.client_id });
       const verifier = data.authorizationCodeVerifier;
       if (!data.userCode || !verifier) throw new Error('O iFood não retornou userCode/authorizationCodeVerifier.');
@@ -861,6 +889,30 @@ export async function handler(event) {
         authorizationCodeVerifier: state.authorizationCodeVerifier,
       });
       const token = normalizeTokenResponse(tokenData);
+
+      // O OAuth distribuído não exige Merchant UUID no momento da troca do código.
+      // Depois que o token existe, descobrimos as lojas realmente autorizadas e,
+      // quando há apenas uma, gravamos o UUID correto automaticamente. Isso evita
+      // conectar um app de produção usando o UUID fixo do Teste (D).
+      let resolvedMerchantUuid = String(integration.store_id || '').trim();
+      if (isHomologationIntegration(integration) && !resolvedMerchantUuid) {
+        resolvedMerchantUuid = TEST_D_MERCHANT_UUID;
+      }
+      try {
+        const merchants = await listAuthorizedMerchants(integration, auth, token.accessToken);
+        const ids = merchants.map((merchant) => String(merchant?.id || '').trim()).filter(Boolean);
+        if (ids.length === 1 && (!resolvedMerchantUuid || !ids.includes(resolvedMerchantUuid))) {
+          resolvedMerchantUuid = ids[0];
+          await sbPatch('delivery_integrations', `id=eq.${encodeURIComponent(integration.id)}`, {
+            store_id: resolvedMerchantUuid,
+            updated_at: new Date().toISOString(),
+          }, auth.token);
+        }
+      } catch {
+        // A autenticação não deve falhar apenas porque o módulo Merchant não está acessível.
+        // Nesse caso, o Merchant UUID continua podendo ser informado manualmente.
+      }
+
       const next = {
         ...state,
         ...token,
@@ -873,7 +925,9 @@ export async function handler(event) {
       await sbPatch('delivery_integrations', `id=eq.${encodeURIComponent(integration.id)}`, {
         enabled: true, sync_status: 'connected', error_message: null, updated_at: new Date().toISOString(),
       }, auth.token);
-      return json(200, { success: true, connected: true, expiresIn: token.expiresIn, message: 'iFood conectado com sucesso.' });
+      return json(200, { success: true, connected: true, expiresIn: token.expiresIn, merchantUuid: resolvedMerchantUuid || null, message: resolvedMerchantUuid
+        ? `iFood conectado com sucesso. Merchant UUID autorizado: ${resolvedMerchantUuid}.`
+        : 'iFood conectado com sucesso. Informe o Merchant UUID se a conta tiver mais de uma loja autorizada.' });
     }
 
     if (action === 'status') {
