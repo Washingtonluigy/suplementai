@@ -11,7 +11,7 @@ const MERCHANT_BASE = `${IFOOD_BASE}/merchant/v1.0`;
 // Pedidos gerados em "Pedidos de teste" exigem o header x-request-homologation.
 const TEST_D_CLIENT_ID = '7781671b-9fca-494d-bb7a-a08e7d8bd28c';
 const TEST_D_MERCHANT_UUID = '1cc635b2-8c62-4b2c-9c01-cff40bdc8c83';
-const IFOOD_FUNCTION_VERSION = 'V52.15';
+const IFOOD_FUNCTION_VERSION = 'V52.16';
 
 function isHomologationIntegration(integration) {
   // O ambiente de homologação é determinado pela credencial do aplicativo Teste (D).
@@ -194,6 +194,20 @@ async function ifoodForm(path, form) {
 }
 
 async function listAuthorizedMerchants(integration, auth, token) {
+  // O ambiente de homologação/Teste (D) trabalha com a loja de teste fixa e com
+  // o header x-request-homologation. O endpoint de Merchant /merchants não deve
+  // ser usado para descobrir lojas nesse ambiente: em alguns tokens de teste ele
+  // responde 200 com array vazio, embora a loja de teste esteja corretamente
+  // vinculada ao aplicativo. Isso fazia a interface mostrar "0 lojas autorizadas"
+  // e também bloqueava o polling dos pedidos de teste.
+  if (isHomologationIntegration(integration)) {
+    return [{
+      id: TEST_D_MERCHANT_UUID,
+      name: 'Loja de teste iFood (D)',
+      corporateName: 'Ambiente de homologação iFood',
+    }];
+  }
+
   const response = await ifoodApiFetch(`${MERCHANT_BASE}/merchants?page=1&size=100`, token, {}, integration);
   const raw = await response.text().catch(() => '');
   let data = null;

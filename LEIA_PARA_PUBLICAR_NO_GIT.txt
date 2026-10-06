@@ -31,5 +31,5 @@ PUBLICACAO
 IMPORTANTE
 - Nao foi criada migration nova para a 99Food nesta versao.
 - Nao ha dependencia de Supabase Edge Function para a 99Food.
-- A função iFood desta versão é a V52.15.
+- A função iFood desta versão é a V52.16.
 - Não publique apenas dist/site; isso mantém a Function antiga. Publique a pasta dist inteira.
