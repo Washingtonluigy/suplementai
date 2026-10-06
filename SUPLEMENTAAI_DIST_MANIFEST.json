@@ -1,0 +1,13 @@
+{
+  "package": "SuplementaAI",
+  "version": "V52.15",
+  "frontend": "site",
+  "functions": "netlify/functions",
+  "functionsIncluded": [
+    "ifood.mjs",
+    "version.mjs"
+  ],
+  "deployRule": "Publique a pasta dist inteira; não publique dist/site isoladamente.",
+  "supabaseChanged": false,
+  "generatedAt": "2026-10-06T21:19:09.302Z"
+}

@@ -3,7 +3,8 @@ SUPLEMENTAAI V38 - 99FOOD TOKEN AUTOMATICO - SEM ALTERAR O SUPABASE
 A pasta dist gerada por npm run build e um pacote Netlify completo.
 Ela contem:
 - site/ -> frontend pronto
-- netlify/functions/ifood.mjs -> integracao iFood
+- netlify/functions/ -> Netlify Functions (incluindo a correção iFood)
+- SUPLEMENTAAI_DIST_MANIFEST.json -> valida que as Functions foram copiadas para o pacote
 - netlify/functions/food99.mjs -> chamadas da API 99Food
 - netlify/functions/food99-webhook.mjs -> webhook 99Food
 - demais Netlify Functions ja existentes
@@ -12,7 +13,7 @@ Ela contem:
 
 PUBLICACAO
 1. Rode npm run build.
-2. Publique O CONTEUDO DA PASTA dist exatamente como nas versoes anteriores.
+2. Publique O CONTEUDO DA PASTA dist inteira. NAO publique somente dist/site. O conteúdo de netlify/functions faz parte do mesmo pacote.
 3. Nao rode supabase db push.
 4. Nao publique Supabase Edge Functions.
 5. Nao precisa abrir/configurar o Supabase para a 99Food.
@@ -30,4 +31,5 @@ PUBLICACAO
 IMPORTANTE
 - Nao foi criada migration nova para a 99Food nesta versao.
 - Nao ha dependencia de Supabase Edge Function para a 99Food.
-- O iFood permanece sem alteracoes funcionais nesta versao.
+- A função iFood desta versão é a V52.15.
+- Não publique apenas dist/site; isso mantém a Function antiga. Publique a pasta dist inteira.
