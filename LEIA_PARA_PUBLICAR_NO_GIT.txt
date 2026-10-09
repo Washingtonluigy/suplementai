@@ -1,4 +1,4 @@
-SUPLEMENTAAI V38 - 99FOOD TOKEN AUTOMATICO - SEM ALTERAR O SUPABASE
+SUPLEMENTAAI V52.19 - INTEGRAÇÃO FISCAL NOTAAS - SEM ALTERAR O SUPABASE
 
 A pasta dist gerada por npm run build e um pacote Netlify completo.
 Ela contem:
@@ -7,6 +7,7 @@ Ela contem:
 - SUPLEMENTAAI_DIST_MANIFEST.json -> valida que as Functions foram copiadas para o pacote
 - netlify/functions/food99.mjs -> chamadas da API 99Food
 - netlify/functions/food99-webhook.mjs -> webhook 99Food
+- netlify/functions/notaas-fiscal.mjs -> integração fiscal Notaas (API key somente por variável de ambiente)
 - demais Netlify Functions ja existentes
 - netlify.toml -> configuracao automatica do Netlify
 - package.json -> dependencias necessarias, inclusive Netlify Blobs
@@ -27,6 +28,15 @@ PUBLICACAO
 - O webhook e uma Netlify Function e sera publicado junto com a dist.
 - Depois do deploy, copie em Integracoes > 99Food a URL exibida e cadastre/atualize o webhook no portal 99Food.
 - A URL tera o formato https://SEU-SITE.netlify.app/.netlify/functions/food99-webhook
+
+NOTAAS
+- Configure uma NOVA chave, apos revogar a que foi divulgada no chat: NOTAAS_API_KEY.
+- NOTAAS_ENVIRONMENT=homologacao; nao ative producao sem revisar configuracao fiscal.
+- Somente a conta proprietaria principal da franquia pode emitir/cancelar nesta versao.
+- A tela Notaas em Notas Fiscais emite NF-e e NFC-e manualmente apos revisao fiscal.
+- Emissao automatica por venda e recebimento por chave de terceiros NAO estao ativados.
+- Os documentos sao registrados na tabela EXISTENTE fiscal_invoices; sem migrations.
+- Arrastar dist em deploy manual Netlify pode NAO publicar Functions; preferir Netlify CLI ou Git.
 
 IMPORTANTE
 - Nao foi criada migration nova para a 99Food nesta versao.

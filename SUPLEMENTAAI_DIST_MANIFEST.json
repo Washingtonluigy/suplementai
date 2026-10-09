@@ -1,14 +1,15 @@
 {
   "package": "SuplementaAI",
-  "version": "V52.18",
+  "version": "V52.19",
   "frontend": "site",
   "functions": "netlify/functions",
   "functionsIncluded": [
     "ifood.mjs",
     "version.mjs",
-    "franchise-team.mjs"
+    "franchise-team.mjs",
+    "notaas-fiscal.mjs"
   ],
   "deployRule": "Publique a pasta dist inteira; não publique dist/site isoladamente.",
   "supabaseChanged": false,
-  "generatedAt": "2026-10-09T15:32:43.385Z"
+  "generatedAt": "2026-10-09T19:01:03.231Z"
 }
