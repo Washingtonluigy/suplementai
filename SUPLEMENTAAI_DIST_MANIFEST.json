@@ -1,6 +1,6 @@
 {
   "package": "SuplementaAI",
-  "version": "V52.19",
+  "version": "V52.20",
   "frontend": "site",
   "functions": "netlify/functions",
   "functionsIncluded": [
@@ -9,7 +9,7 @@
     "franchise-team.mjs",
     "notaas-fiscal.mjs"
   ],
-  "deployRule": "Publique a pasta dist inteira; não publique dist/site isoladamente.",
+  "deployRule": "Upload estático: publique somente dist inteira (index.html na raiz). Regras _redirects habilitam proxy Notaas.",
   "supabaseChanged": false,
-  "generatedAt": "2026-10-09T19:01:03.231Z"
+  "generatedAt": "2026-10-09T20:56:19.245Z"
 }

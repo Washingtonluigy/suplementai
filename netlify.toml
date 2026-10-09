@@ -11,6 +11,11 @@
   function = "frenet"
 
 [[redirects]]
+  from = "/notaas-public-proxy/*"
+  to = "https://platform.notaas.com.br/api/v1/:splat"
+  status = 200
+
+[[redirects]]
   from = "/*"
   to = "/index.html"
   status = 200

@@ -1,13 +1,13 @@
-SUPLEMENTAAI V52.19 - INTEGRAÇÃO FISCAL NOTAAS - SEM ALTERAR O SUPABASE
+SUPLEMENTAAI V52.20 - NOTAAS DIRETO VIA DIST - MODO EXPERIMENTAL
 
-A pasta dist gerada por npm run build e um pacote Netlify completo.
+A pasta dist gerada por npm run build agora possui index.html NA RAIZ, alem de site/.
 Ela contem:
 - site/ -> frontend pronto
 - netlify/functions/ -> Netlify Functions (incluindo a correção iFood)
 - SUPLEMENTAAI_DIST_MANIFEST.json -> valida que as Functions foram copiadas para o pacote
 - netlify/functions/food99.mjs -> chamadas da API 99Food
 - netlify/functions/food99-webhook.mjs -> webhook 99Food
-- netlify/functions/notaas-fiscal.mjs -> integração fiscal Notaas (API key somente por variável de ambiente)
+- netlify/functions/notaas-fiscal.mjs -> integração fiscal Notaas (rota server-side legada, modo fiscal atual NÃO usa esta função)
 - demais Netlify Functions ja existentes
 - netlify.toml -> configuracao automatica do Netlify
 - package.json -> dependencias necessarias, inclusive Netlify Blobs
