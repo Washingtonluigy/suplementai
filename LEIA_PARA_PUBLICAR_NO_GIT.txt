@@ -1,4 +1,4 @@
-SUPLEMENTAAI V52.20 - NOTAAS DIRETO VIA DIST - MODO EXPERIMENTAL
+SUPLEMENTAAI V52.21 - NOTAAS DIRETO VIA DIST - MODO EXPERIMENTAL
 
 A pasta dist gerada por npm run build agora possui index.html NA RAIZ, alem de site/.
 Ela contem:

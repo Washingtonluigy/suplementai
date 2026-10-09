@@ -1,6 +1,6 @@
 {
   "package": "SuplementaAI",
-  "version": "V52.20",
+  "version": "V52.21",
   "frontend": "site",
   "functions": "netlify/functions",
   "functionsIncluded": [
@@ -11,5 +11,5 @@
   ],
   "deployRule": "Upload estático: publique somente dist inteira (index.html na raiz). Regras _redirects habilitam proxy Notaas.",
   "supabaseChanged": false,
-  "generatedAt": "2026-10-09T20:56:19.245Z"
+  "generatedAt": "2026-10-09T21:50:01.329Z"
 }
