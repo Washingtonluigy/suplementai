@@ -258,6 +258,9 @@ export const handler = async (event) => {
         }),
       };
       if (payload.require_confirmation_code === true) body.exigir_codigo_confirmacao = true;
+      if (payload.with_return === true) {
+        body.info_antes_aceite = String(payload.info_before_accept || 'RETORNO OBRIGATÓRIO: após entregar ao cliente, retornar à origem.').trim();
+      } else if (payload.info_before_accept) body.info_antes_aceite = String(payload.info_before_accept).trim();
 
       const result = await machine(`${MT_BASE_URL_V2}/entregas`, {
         method: 'POST',

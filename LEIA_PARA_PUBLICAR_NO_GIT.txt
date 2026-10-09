@@ -31,5 +31,5 @@ PUBLICACAO
 IMPORTANTE
 - Nao foi criada migration nova para a 99Food nesta versao.
 - Nao ha dependencia de Supabase Edge Function para a 99Food.
-- A função iFood desta versão é a V52.16.
+- A função iFood é a mesma da V52.17. Inclui franchise-team.mjs (administração segura de usuários, requer SUPABASE_SERVICE_ROLE_KEY nas variáveis do Netlify).
 - Não publique apenas dist/site; isso mantém a Function antiga. Publique a pasta dist inteira.

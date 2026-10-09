@@ -1,4 +1,4 @@
-const VERSION = 'V52.16';
+const VERSION = 'V52.17';
 
 export async function handler(event) {
   if (event.httpMethod === 'GET') {
