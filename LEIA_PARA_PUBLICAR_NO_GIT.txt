@@ -1,4 +1,4 @@
-SUPLEMENTAAI V52.21 - NOTAAS DIRETO VIA DIST - MODO EXPERIMENTAL
+SUPLEMENTAAI V52.23 - NOTAAS DIRETO VIA DIST - MODO EXPERIMENTAL
 
 A pasta dist gerada por npm run build agora possui index.html NA RAIZ, alem de site/.
 Ela contem:
@@ -41,5 +41,5 @@ NOTAAS
 IMPORTANTE
 - Nao foi criada migration nova para a 99Food nesta versao.
 - Nao ha dependencia de Supabase Edge Function para a 99Food.
-- A função iFood é a mesma da V52.17. Inclui franchise-team.mjs (administração segura de usuários, requer SUPABASE_SERVICE_ROLE_KEY nas variáveis do Netlify).
+- A função iFood foi atualizada na V52.23 para fazer polling com Order + Events sem exigir Merchant. Inclui franchise-team.mjs (administração segura de usuários, requer SUPABASE_SERVICE_ROLE_KEY nas variáveis do Netlify).
 - Não publique apenas dist/site; isso mantém a Function antiga. Publique a pasta dist inteira.

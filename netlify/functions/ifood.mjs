@@ -11,7 +11,8 @@ const MERCHANT_BASE = `${IFOOD_BASE}/merchant/v1.0`;
 // Pedidos gerados em "Pedidos de teste" exigem o header x-request-homologation.
 const TEST_D_CLIENT_ID = '7781671b-9fca-494d-bb7a-a08e7d8bd28c';
 const TEST_D_MERCHANT_UUID = '1cc635b2-8c62-4b2c-9c01-cff40bdc8c83';
-const IFOOD_FUNCTION_VERSION = 'V52.16';
+const MERCHANT_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const IFOOD_FUNCTION_VERSION = 'V52.23';
 
 function isHomologationIntegration(integration) {
   // O ambiente de homologação é determinado pela credencial do aplicativo Teste (D).
@@ -219,43 +220,27 @@ async function listAuthorizedMerchants(integration, auth, token) {
   return Array.isArray(data) ? data : (Array.isArray(data?.merchants) ? data.merchants : []);
 }
 
-async function resolveAuthorizedMerchant(integration, auth, token, { persist = true } = {}) {
-  const merchants = await listAuthorizedMerchants(integration, auth, token);
-  const normalized = merchants
-    .map((merchant) => ({
-      id: String(merchant?.id || merchant?.merchantId || '').trim(),
-      name: String(merchant?.name || merchant?.corporateName || 'Loja iFood').trim(),
-      corporateName: String(merchant?.corporateName || '').trim(),
-    }))
-    .filter((merchant) => merchant.id);
-
-  if (!normalized.length) {
-    throw new Error(
-      'O token iFood foi obtido, mas nenhuma loja autorizada foi retornada pelo endpoint /merchant/v1.0/merchants. ' +
-      'Confirme que a loja autorizou o aplicativo correto e aguarde a propagação da permissão antes de gerar um novo token.'
-    );
+// Order + Events bastam para polling. A API Merchant serve somente para
+// descoberta opcional de lojas e NÃO pode bloquear pedidos em produção.
+function pollingMerchantUuid(integration) {
+  const homologation = isHomologationIntegration(integration);
+  const merchantUuid = homologation
+    ? TEST_D_MERCHANT_UUID
+    : String(integration.store_id || '').trim();
+  if (!MERCHANT_UUID_PATTERN.test(merchantUuid)) {
+    throw new Error('Informe e salve o Merchant UUID real da loja na integração iFood. Consulte o UUID no Portal do Parceiro; o módulo Merchant não é obrigatório.');
   }
-
-  const currentId = String(integration.store_id || '').trim();
-  const current = normalized.find((merchant) => merchant.id === currentId);
-  if (current) return { merchant: current, merchants: normalized, changed: false };
-
-  if (normalized.length === 1) {
-    const selected = normalized[0];
-    if (persist && selected.id !== currentId) {
-      await sbPatch('delivery_integrations', `id=eq.${encodeURIComponent(integration.id)}`, {
-        store_id: selected.id,
-        updated_at: new Date().toISOString(),
-      }, auth.token);
-    }
-    return { merchant: selected, merchants: normalized, changed: selected.id !== currentId };
+  if (!homologation && merchantUuid === TEST_D_MERCHANT_UUID) {
+    throw new Error('O UUID salvo é da loja Teste D, mas o aplicativo conectado está em produção. Informe o Merchant UUID real da loja autorizada.');
   }
+  return merchantUuid;
+}
 
-  const preview = normalized.slice(0, 10).map((merchant) => `${merchant.name} (${merchant.id})`).join('; ');
-  throw new Error(
-    `O Merchant UUID salvo não está autorizado pelo token atual. O iFood retornou ${normalized.length} loja(s) autorizada(s): ${preview}. ` +
-    'Selecione uma dessas lojas como Merchant UUID e faça um novo polling.'
-  );
+function eventListFromResponse(data) {
+  if (Array.isArray(data)) return data;
+  if (Array.isArray(data?.events)) return data.events;
+  // Uma resposta 200 com estrutura inesperada não pode ser interpretada como 0 eventos.
+  throw new Error('iFood retornou HTTP 200, mas o formato dos eventos não foi reconhecido. Verifique a versão do endpoint Events.');
 }
 
 function normalizeTokenResponse(data, previousRefreshToken = '') {
@@ -591,171 +576,127 @@ async function processEvent(integration, auth, event) {
   return { ack: true, imported, updated, ignored: !imported && !updated };
 }
 
+async function pollingRequest(integration, auth) {
+  const merchantUuid = pollingMerchantUuid(integration);
+  const { response } = await withFreshToken(integration, auth, (token) =>
+    ifoodApiFetch(`${EVENTS_BASE}/events:polling`, token, {
+      headers: { 'x-polling-merchants': merchantUuid },
+    }, integration),
+  );
+  if (response.status !== 200 && response.status !== 204) {
+    const reason = await safeText(response);
+    const context = response.status === 403
+      ? ' O token não está autorizado no módulo Events para este Merchant UUID. Confirme o UUID da loja real e se o aplicativo Farm Tecnologia tem Events autorizado.'
+      : response.status === 401
+        ? ' A renovação do token foi tentada; confira as credenciais e a autorização OAuth.'
+        : '';
+    throw new Error(`iFood Events polling (${response.status}): ${reason}.${context}`);
+  }
+  return { response, merchantUuid };
+}
+
 async function testIfoodConnection(integration, auth) {
-  if (!integration.enabled) throw new Error('A integração iFood ainda não está conectada. Gere o código, autorize no Portal do Parceiro e conecte novamente.');
+  if (!integration.enabled) throw new Error('Ative/conecte a integração iFood primeiro.');
 
-  const state = await ensureToken(integration, auth);
-  const resolved = await resolveAuthorizedMerchant(integration, auth, state.accessToken);
-  integration = { ...integration, store_id: resolved.merchant.id };
-
-  const homologation = isHomologationIntegration(integration);
-  let mode = homologation ? 'events' : 'order';
-  let response;
-
-  if (homologation) {
-    ({ response } = await withFreshToken(integration, auth, (token) =>
-      ifoodApiFetch(`${EVENTS_BASE}/events:polling`, token, {
-        headers: { 'x-polling-merchants': integration.store_id },
-      }, integration),
-    ));
-
-    if ([400, 403, 404, 405].includes(response.status)) {
-      mode = 'order';
-      ({ response } = await withFreshToken(integration, auth, (token) =>
-        ifoodApiFetch(`${ORDER_BASE}/orders:polling?limit=1`, token, {}, integration),
-      ));
-    }
-  } else {
-    ({ response } = await withFreshToken(integration, auth, (token) =>
-      ifoodApiFetch(`${ORDER_BASE}/orders:polling?limit=1`, token, {}, integration),
-    ));
-
-    if ([400, 403, 404, 405].includes(response.status)) {
-      mode = 'events';
-      ({ response } = await withFreshToken(integration, auth, (token) =>
-        ifoodApiFetch(`${EVENTS_BASE}/events:polling`, token, {
-          headers: { 'x-polling-merchants': integration.store_id },
-        }, integration),
-      ));
-    }
-  }
-
-  if (![200, 204].includes(response.status)) {
-    throw new Error(`iFood teste de conexão ${mode}${homologation ? ' (homologação)' : ''} (${response.status}): ${await safeText(response)}`);
-  }
-
+  // Testa o módulo Events, autorizado pela loja, em vez de exigir o módulo Merchant.
+  const { response, merchantUuid } = await pollingRequest(integration, auth);
+  const pendingEvents = response.status === 204 ? [] : eventListFromResponse(await response.json());
+  // O teste NÃO envia ACK nem consome definitivamente os eventos.
   await sbPatch('delivery_integrations', `id=eq.${encodeURIComponent(integration.id)}`, {
-    sync_status: 'connected',
-    error_message: null,
-    updated_at: new Date().toISOString(),
+    sync_status: 'connected', error_message: null, updated_at: new Date().toISOString(),
   }, auth.token);
 
   await insertLog(integration, auth, {
     action: 'status_update',
     status: 'success',
-    message: `Conectividade iFood validada (${mode}${homologation ? ' / homologação' : ''}).`,
-    payload: { kind: 'ifood_connectivity_test', mode, merchantUuid: integration.store_id, homologation },
+    message: `API Events acessível; ${pendingEvents.length || 0} evento(s) aguardando processamento.`,
+    payload: { kind: 'ifood_connectivity_test', mode: 'events', merchantUuid, httpStatus: response.status, pendingEvents: pendingEvents.length || 0 },
   });
-
   return {
-    success: true,
-    connected: true,
-    mode,
-    homologation,
-    message: homologation
-      ? `Conexão com o iFood validada no ambiente de teste/homologação (${mode}).`
-      : `Conexão com o iFood validada (${mode}).`,
+    success: true, connected: true, mode: 'events',
+    homologation: isHomologationIntegration(integration), merchantUuid,
+    httpStatus: response.status,
+    pendingEvents: pendingEvents.length || 0,
+    message: `iFood Events respondeu HTTP ${response.status} para ${merchantUuid}. ${pendingEvents.length || 0} evento(s) aguardando processamento. A chegada e gravação de pedidos serão confirmadas ao buscar pedidos.`,
   };
 }
 
 async function pollEvents(integration, auth) {
   if (!integration.enabled) throw new Error('Ative/conecte a integração iFood primeiro.');
-
-  const state = await ensureToken(integration, auth);
-  const resolved = await resolveAuthorizedMerchant(integration, auth, state.accessToken);
-  integration = { ...integration, store_id: resolved.merchant.id };
-
-  const homologation = isHomologationIntegration(integration);
-  let pollMode = homologation ? 'events' : 'order';
-  let response;
-
-  if (homologation) {
-    ({ response } = await withFreshToken(integration, auth, (token) =>
-      ifoodApiFetch(`${EVENTS_BASE}/events:polling`, token, {
-        headers: { 'x-polling-merchants': integration.store_id },
-      }, integration),
-    ));
-
-    if ([400, 403, 404, 405].includes(response.status)) {
-      pollMode = 'order';
-      ({ response } = await withFreshToken(integration, auth, (token) =>
-        ifoodApiFetch(`${ORDER_BASE}/orders:polling?limit=100`, token, {}, integration),
-      ));
-    }
-  } else {
-    ({ response } = await withFreshToken(integration, auth, (token) =>
-      ifoodApiFetch(`${ORDER_BASE}/orders:polling?limit=100`, token, {}, integration),
-    ));
-
-    if ([400, 403, 404, 405].includes(response.status)) {
-      pollMode = 'events';
-      ({ response } = await withFreshToken(integration, auth, (token) =>
-        ifoodApiFetch(`${EVENTS_BASE}/events:polling`, token, {
-          headers: { 'x-polling-merchants': integration.store_id },
-        }, integration),
-      ));
-    }
-  }
+  const { response, merchantUuid } = await pollingRequest(integration, auth);
+  const now = new Date().toISOString();
 
   if (response.status === 204) {
     await sbPatch('delivery_integrations', `id=eq.${encodeURIComponent(integration.id)}`, {
-      sync_status: 'connected', last_sync_at: new Date().toISOString(), error_message: null, updated_at: new Date().toISOString(),
+      sync_status: 'connected', last_sync_at: now, error_message: null, updated_at: now,
     }, auth.token);
     return {
-      success: true, events: 0, imported: 0, updated: 0, pollMode, homologation,
-      message: homologation
-        ? `Nenhum evento novo no iFood Teste (${pollMode}, homologação ativa).`
-        : 'Nenhum evento novo no iFood.',
+      success: true, events: 0, imported: 0, updated: 0, acknowledged: 0,
+      failed: 0, errors: [], pollMode: 'events', httpStatus: 204, merchantUuid,
+      homologation: isHomologationIntegration(integration),
+      message: `iFood Events ativo (HTTP 204). Nenhum evento novo para ${merchantUuid}.`,
     };
   }
 
-  if (!response.ok) throw new Error(`iFood polling ${pollMode}${homologation ? ' (homologação)' : ''} (${response.status}): ${await safeText(response)}`);
-  const raw = await response.json().catch(() => []);
-  const events = Array.isArray(raw) ? raw : (Array.isArray(raw?.events) ? raw.events : []);
+  const events = eventListFromResponse(await response.json());
   const ackIds = [];
+  const errors = [];
+  const cancellationFailures = [];
   let imported = 0;
   let updated = 0;
   let retry = 0;
-  const cancellationFailures = [];
+  let ignored = 0;
 
   for (const event of events) {
+    const eventId = String(event?.id || '').trim();
+    const orderId = String(event?.orderId || event?.metadata?.id || '').trim();
+    // O filtro é aplicado também pelo iFood; validamos defensivamente a resposta.
+    if (event?.merchantId && String(event.merchantId) !== merchantUuid) {
+      errors.push({ orderId, eventId, code: 'MERCHANT_MISMATCH', error: 'Evento de outra loja recebido; não foi confirmado.' });
+      continue;
+    }
     try {
       const result = await processEvent(integration, auth, event);
-      if (result.ack && event.id) ackIds.push(event.id);
+      if (result.ack) {
+        if (!eventId) throw new Error('Evento sem ID: não é possível confirmar com segurança.');
+        ackIds.push(eventId);
+      }
       if (result.imported) imported += 1;
       if (result.updated) updated += 1;
       if (result.retry) retry += 1;
+      if (result.ignored) ignored += 1;
       if (result.cancellationFailed && result.cancellationFailure) cancellationFailures.push(result.cancellationFailure);
     } catch (error) {
+      errors.push({ orderId, eventId, code: String(event?.code || ''), error: error?.message || String(error) });
       await insertLog(integration, auth, {
-        action: 'status_update', status: 'error', platformOrderId: event.orderId || null,
-        message: `Erro ao processar evento iFood: ${error.message}`,
-        payload: { eventId: event.id, code: event.code, fullCode: event.fullCode, pollMode, homologation },
+        action: 'status_update', status: 'error', platformOrderId: orderId || null,
+        message: `Falha ao processar evento iFood: ${error?.message || String(error)}`,
+        payload: { kind: 'ifood_event_error', eventId, code: event?.code, fullCode: event?.fullCode, merchantUuid },
       }).catch(() => undefined);
     }
   }
 
-  if (ackIds.length) await acknowledgeEvents(integration, auth, ackIds, pollMode);
+  // Só confirma eventos que foram processados. Pedidos que falharam permanecem
+  // pendentes no iFood e podem ser reprocessados no polling seguinte.
+  if (ackIds.length) await acknowledgeEvents(integration, auth, [...new Set(ackIds)], 'events');
 
+  const failure = errors.length > 0;
+  const errorMessage = failure ? `${errors.length} evento(s) falharam; exemplo: ${errors[0].error}` : null;
   await sbPatch('delivery_integrations', `id=eq.${encodeURIComponent(integration.id)}`, {
-    sync_status: 'connected', last_sync_at: new Date().toISOString(), error_message: null, updated_at: new Date().toISOString(),
+    sync_status: failure ? 'error' : 'connected', last_sync_at: now,
+    error_message: errorMessage, updated_at: now,
   }, auth.token);
 
+  const message = failure
+    ? `Recebidos ${events.length} evento(s); ${imported} pedido(s) importado(s), ${ackIds.length} confirmado(s) e ${errors.length} com erro. ${errors[0].error}`
+    : imported
+      ? `${imported} pedido(s) novo(s) do iFood importado(s). (${events.length} eventos, ${ackIds.length} confirmados)`
+      : `Polling iFood Events concluído: ${events.length} evento(s), ${updated} atualização(ões), ${ignored} ignorado(s), ${ackIds.length} confirmado(s).`;
   return {
-    success: true,
-    events: events.length,
-    acknowledged: ackIds.length,
-    imported,
-    updated,
-    retry,
-    cancellationFailures,
-    pollMode,
-    homologation,
-    message: cancellationFailures.length
-      ? `${cancellationFailures.length} cancelamento(s) recusado(s) pelo iFood. Consulte o motivo exibido no painel.`
-      : imported
-      ? `${imported} pedido(s) novo(s) do iFood importado(s).`
-      : `Polling iFood concluído (${events.length} evento(s), ${pollMode}${homologation ? ', homologação' : ''}).`,
+    success: !failure, events: events.length, acknowledged: ackIds.length,
+    imported, updated, ignored, retry, failed: errors.length, errors,
+    cancellationFailures, pollMode: 'events', httpStatus: response.status,
+    merchantUuid, homologation: isHomologationIntegration(integration), message,
   };
 }
 
@@ -956,19 +897,15 @@ export async function handler(event) {
       });
       const token = normalizeTokenResponse(tokenData);
 
-      // O OAuth distribuído não exige Merchant UUID no momento da troca do código.
-      // Depois que o token existe, descobrimos as lojas realmente autorizadas e,
-      // quando há apenas uma, gravamos o UUID correto automaticamente. Isso evita
-      // conectar um app de produção usando o UUID fixo do Teste (D).
-      let resolvedMerchantUuid = String(integration.store_id || '').trim();
-      let authorizedMerchants = [];
-      try {
-        const resolved = await resolveAuthorizedMerchant(integration, auth, token.accessToken);
-        resolvedMerchantUuid = resolved.merchant.id;
-        authorizedMerchants = resolved.merchants;
-      } catch (merchantError) {
-        // Não derruba o OAuth se o iFood ainda estiver propagando a permissão do merchant.
-        // O polling/teste emitirá depois o diagnóstico correto e evitará consultar UUID não autorizado.
+      // A troca OAuth não exige /merchant/v1.0/merchants. Aplicações autorizadas
+      // apenas em Order + Events não devem ser tratadas como desconectadas.
+      const resolvedMerchantUuid = isHomologationIntegration(integration)
+        ? TEST_D_MERCHANT_UUID
+        : String(integration.store_id || '').trim();
+      if (isHomologationIntegration(integration) && integration.store_id !== TEST_D_MERCHANT_UUID) {
+        await sbPatch('delivery_integrations', `id=eq.${encodeURIComponent(integration.id)}`, {
+          store_id: TEST_D_MERCHANT_UUID, updated_at: new Date().toISOString(),
+        }, auth.token);
       }
 
       const next = {
@@ -984,13 +921,23 @@ export async function handler(event) {
         enabled: true, sync_status: 'connected', error_message: null, updated_at: new Date().toISOString(),
       }, auth.token);
       return json(200, { success: true, connected: true, expiresIn: token.expiresIn, merchantUuid: resolvedMerchantUuid || null, message: resolvedMerchantUuid
-        ? `iFood conectado com sucesso. Merchant UUID autorizado: ${resolvedMerchantUuid}.`
-        : 'iFood conectado com sucesso. Informe o Merchant UUID se a conta tiver mais de uma loja autorizada.' });
+        ? `OAuth conectado. UUID configurado: ${resolvedMerchantUuid}. Clique em Testar conexão para verificar acesso ao módulo Events.`
+        : 'OAuth conectado. Salve o Merchant UUID da loja autorizada no Portal do Parceiro e clique em Testar conexão.' });
     }
 
     if (action === 'list_merchants') {
       const state = await ensureToken(integration, auth);
-      const merchants = await listAuthorizedMerchants(integration, auth, state.accessToken);
+      let merchants;
+      try {
+        merchants = await listAuthorizedMerchants(integration, auth, state.accessToken);
+      } catch (error) {
+        if (/lojas autorizadas \(403\)|lojas autorizadas \(404\)/.test(String(error?.message || ''))) {
+          return json(200, { success: true, merchants: [], merchantLookupAvailable: false,
+            configuredMerchantUuid: String(integration.store_id || '').trim(),
+            message: 'O aplicativo não tem acesso à listagem do módulo Merchant. Isso não bloqueia os módulos Order e Events. Confirme o UUID no Portal do Parceiro e use Testar conexão.' });
+        }
+        throw error;
+      }
       const normalized = merchants
         .map((merchant) => ({
           id: String(merchant?.id || merchant?.merchantId || '').trim(),
@@ -1001,6 +948,8 @@ export async function handler(event) {
       return json(200, {
         success: true,
         merchants: normalized,
+        merchantLookupAvailable: true,
+        configuredMerchantUuid: String(integration.store_id || '').trim(),
         selectedMerchantUuid: normalized.some((merchant) => merchant.id === String(integration.store_id || '').trim())
           ? String(integration.store_id).trim()
           : null,
@@ -1018,6 +967,9 @@ export async function handler(event) {
         merchantUuid: integration.store_id,
         expiresAt: connected ? state.expiresAt : null,
         hasRefreshToken: Boolean(state?.refreshToken),
+        functionVersion: IFOOD_FUNCTION_VERSION,
+        eventsPolling: true,
+        connectionNote: 'OAuth ativo não significa que o recebimento de pedidos foi validado. Use Testar conexão (Events) e Buscar pedidos.',
       });
     }
 
