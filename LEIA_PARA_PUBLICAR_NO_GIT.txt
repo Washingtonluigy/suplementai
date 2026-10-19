@@ -1,4 +1,4 @@
-SUPLEMENTAAI V52.25 - RELATORIOS E EQUIPES - MODO DIST
+SUPLEMENTAAI V52.26 - RELATORIOS E EQUIPES - MODO DIST
 
 A pasta dist gerada por npm run build agora possui index.html NA RAIZ, alem de site/.
 Ela contem:
@@ -7,7 +7,9 @@ Ela contem:
 - SUPLEMENTAAI_DIST_MANIFEST.json -> valida que as Functions foram copiadas para o pacote
 - netlify/functions/food99.mjs -> chamadas da API 99Food
 - netlify/functions/food99-webhook.mjs -> webhook 99Food
-- netlify/functions/notaas-fiscal.mjs -> integração fiscal Notaas (rota server-side legada, modo fiscal atual NÃO usa esta função)
+- netlify/functions/notaas-fiscal.mjs -> integracao legada Notaas
+- netlify/functions/focus-fiscal.mjs -> recebimento e emissao de notas Focus
+- netlify/functions/_focus-credentials.mjs -> tokens incorporados por solicitacao do proprietario (NAO e seguro publicar em repositorio publico)
 - demais Netlify Functions ja existentes
 - netlify.toml -> configuracao automatica do Netlify
 - package.json -> dependencias necessarias, inclusive Netlify Blobs
@@ -30,13 +32,22 @@ PUBLICACAO
 - A URL tera o formato https://SEU-SITE.netlify.app/.netlify/functions/food99-webhook
 
 NOTAAS
-- Configure uma NOVA chave, apos revogar a que foi divulgada no chat: NOTAAS_API_KEY.
+- Integração legada preservada. Recomenda-se revogar a chave Notaas antiga divulgada no chat.
 - NOTAAS_ENVIRONMENT=homologacao; nao ative producao sem revisar configuracao fiscal.
 - Somente a conta proprietaria principal da franquia pode emitir/cancelar nesta versao.
 - A tela Notaas em Notas Fiscais emite NF-e e NFC-e manualmente apos revisao fiscal.
 - Emissao automatica por venda e recebimento por chave de terceiros NAO estao ativados.
 - Os documentos sao registrados na tabela EXISTENTE fiscal_invoices; sem migrations.
 - Arrastar dist em deploy manual Netlify pode NAO publicar Functions; preferir Netlify CLI ou Git.
+
+FOCUS NFE
+- A V52.26 contem tokens de producao e homologacao incorporados SOMENTE nas Netlify Functions por solicitacao expressa do proprietario.
+- REPOSITORIO GITHUB PUBLICO: QUALQUER PESSOA CONSEGUE VER E COPIAR OS TOKENS. Nao publique em repositorio publico.
+- Producao: consulta de NF-e recebidas, com XML via distribuicao e possivel manifestacao.
+- Homologacao: emissao de NF-e/NFC-e de teste. Producao so com confirmacao explicita e configuracao fiscal revisada.
+- Configure o CSC da NFC-e e as series/proximos numeros CORRETOS no painel Focus antes de emitir de verdade.
+- A importacao ao estoque exige vinculo fisico e confirmacao, lote/validade so entram se presentes no XML ou conferidos na embalagem.
+- As credenciais NUNCA sao enviadas como resposta da Netlify Function ao navegador, mas continuam copiaveis no repositorio.
 
 IMPORTANTE
 - Nao foi criada migration nova para a 99Food nesta versao.
