@@ -1,4 +1,4 @@
-SUPLEMENTAAI V52.26 - RELATORIOS E EQUIPES - MODO DIST
+SUPLEMENTAAI V52.27 - MASTER FISCAL POR UNIDADE - MODO DIST
 
 A pasta dist gerada por npm run build agora possui index.html NA RAIZ, alem de site/.
 Ela contem:
@@ -41,13 +41,19 @@ NOTAAS
 - Arrastar dist em deploy manual Netlify pode NAO publicar Functions; preferir Netlify CLI ou Git.
 
 FOCUS NFE
-- A V52.26 contem tokens de producao e homologacao incorporados SOMENTE nas Netlify Functions por solicitacao expressa do proprietario.
+- A V52.27 contem tokens de producao e homologacao incorporados SOMENTE nas Netlify Functions por solicitacao expressa do proprietario.
 - REPOSITORIO GITHUB PUBLICO: QUALQUER PESSOA CONSEGUE VER E COPIAR OS TOKENS. Nao publique em repositorio publico.
 - Producao: consulta de NF-e recebidas, com XML via distribuicao e possivel manifestacao.
 - Homologacao: emissao de NF-e/NFC-e de teste. Producao so com confirmacao explicita e configuracao fiscal revisada.
 - Configure o CSC da NFC-e e as series/proximos numeros CORRETOS no painel Focus antes de emitir de verdade.
 - A importacao ao estoque exige vinculo fisico e confirmacao, lote/validade so entram se presentes no XML ou conferidos na embalagem.
 - As credenciais NUNCA sao enviadas como resposta da Netlify Function ao navegador, mas continuam copiaveis no repositorio.
+
+MASTER FISCAL
+- Master > Fiscal (ou Fiscal no cartão da unidade) abre a mesma interface do franqueado, isolada pelo ID da franquia.
+- Centro compartilha os dados ja salvos; unidades futuras nao herdam CNPJ nem tokens de outra franquia.
+- A API Focus exige papel Master autenticado em app_metadata ou vínculo direto com a franquia; apenas user_metadata.role nao habilita operacoes fiscais protegidas.
+- Se aparecer erro de permissao no Master, essa autorizacao precisa ser validada pelo administrador do provedor de autenticacao. Nao ha bypass no frontend.
 
 IMPORTANTE
 - Nao foi criada migration nova para a 99Food nesta versao.

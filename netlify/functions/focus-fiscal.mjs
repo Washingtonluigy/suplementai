@@ -3,7 +3,12 @@
 import { getSupabaseUser, SUPABASE_URL, SUPABASE_ANON_KEY } from './_supabase-public.mjs';
 import { FOCUS_TOKENS_EMBEDDED } from './_focus-credentials.mjs';
 
-const EMITTER_CNPJ = '45325262000164';
+const EMITTER_CNPJ = '45325262000164'; // Integração Focus existente: Suplementa Aí Centro. Não reaproveitar para outras franquias.
+const isTrustedMaster = user => user?.app_metadata?.role === 'master' || (Array.isArray(user?.app_metadata?.roles) && user.app_metadata.roles.includes('master'));
+const isCentroUnit = row => {
+  const text = `${row?.name || ''} ${row?.slug || ''}`.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  return text.includes('suplementa') && text.includes('centro');
+};
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DIGITS = v => String(v ?? '').replace(/\D/g, '');
 const safe = (v, max = 250) => String(v ?? '').trim().slice(0,max);
@@ -18,20 +23,27 @@ async function authorize(event, franchiseId, action) {
   if (!auth) throw raised(401, 'Sessão expirada. Entre novamente no SuplementaAI.');
   // A autorização não depende de chave administrativa do Supabase nem altera políticas.
   const headers = { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${auth.token}`, Accept:'application/json' };
-  const userUrl = `${SUPABASE_URL}/rest/v1/franchise_users?select=id,phone&franchise_id=eq.${franchiseId}&auth_user_id=eq.${auth.user.id}&limit=1`;
-  const membership = await fetch(userUrl, { headers, signal: AbortSignal.timeout(12000) });
-  const members = membership.ok ? await membership.json().catch(() => []) : [];
-  // Não confiar em user_metadata.role=master, que pode ser alterado pelo cliente.
-  // Somente usuários autenticados vinculados à franquia podem operar a Focus.
-  if (!Array.isArray(members) || !members.length) throw raised(403, 'Usuário não pertence à unidade fiscal.');
-  const phone=String(members[0]?.phone||'');
-  const marker='|||SAIACL1:';
-  let profile=null;
-  if (phone.includes(marker)) {
-    try { profile=JSON.parse(Buffer.from(phone.split(marker)[1]||'', 'base64').toString('utf8')); } catch { throw raised(403, 'Perfil de acesso fiscal inválido.'); }
+  // As credenciais Focus desta versão pertencem exclusivamente à Suplementa Aí Centro.
+  // A seleção no Master NÃO pode permitir usar o token da Centro para outro CNPJ/unidade.
+  const unitResponse = await fetch(`${SUPABASE_URL}/rest/v1/franchises?select=id,name,slug&id=eq.${franchiseId}&limit=1`, { headers, signal: AbortSignal.timeout(12000) });
+  const units = unitResponse.ok ? await unitResponse.json().catch(() => []) : [];
+  if (!Array.isArray(units) || !units.length || !isCentroUnit(units[0])) throw raised(403, 'A integração Focus cadastrada pertence apenas à Suplementa Aí Centro. Configure uma credencial própria da franquia para operar nesta unidade.');
+
+  if (!isTrustedMaster(auth.user)) {
+    const userUrl = `${SUPABASE_URL}/rest/v1/franchise_users?select=id,phone&franchise_id=eq.${franchiseId}&auth_user_id=eq.${auth.user.id}&limit=1`;
+    const membership = await fetch(userUrl, { headers, signal: AbortSignal.timeout(12000) });
+    const members = membership.ok ? await membership.json().catch(() => []) : [];
+    // user_metadata.role NÃO é uma prova segura de que a conta pertence ao Master.
+    if (!Array.isArray(members) || !members.length) throw raised(403, 'Acesso fiscal negado. Para operar pelo Master, é necessário papel Master verificado no app_metadata da conta; o login do franqueado mantém sua autorização normal.');
+    const phone = String(members[0]?.phone || '');
+    const marker = '|||SAIACL1:';
+    let profile = null;
+    if (phone.includes(marker)) {
+      try { profile = JSON.parse(Buffer.from(phone.split(marker)[1] || '', 'base64').toString('utf8')); } catch { throw raised(403, 'Perfil de acesso fiscal inválido.'); }
+    }
+    if (profile?.mode === 'limited' && !(Array.isArray(profile.permissions) && profile.permissions.includes('fiscal'))) throw raised(403, 'Usuário sem acesso à área fiscal.');
+    if (['issue', 'cancel', 'received_manifest'].includes(action) && profile?.mode === 'limited') throw raised(403, 'Emissão, cancelamento e manifestação fiscal exigem acesso total da franquia.');
   }
-  if (profile?.mode==='limited' && !(Array.isArray(profile.permissions)&&profile.permissions.includes('fiscal'))) throw raised(403,'Usuário sem acesso à área fiscal.');
-  if (['issue','cancel','received_manifest'].includes(action) && profile?.mode==='limited') throw raised(403,'Emissão, cancelamento e manifestação fiscal exigem acesso total da franquia.');
   const settings = await fetch(`${SUPABASE_URL}/rest/v1/fiscal_settings?select=cnpj&franchise_id=eq.${franchiseId}&limit=1`, { headers, signal: AbortSignal.timeout(12000) });
   const rows = settings.ok ? await settings.json().catch(() => []) : [];
   if (!Array.isArray(rows) || DIGITS(rows[0]?.cnpj) !== EMITTER_CNPJ) throw raised(403, 'Cadastre e salve o CNPJ fiscal da Suplementa Aí nesta unidade antes de utilizar a Focus.');
