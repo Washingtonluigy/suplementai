@@ -1,4 +1,4 @@
-import { getStore } from '@netlify/blobs';
+import { connectLambda, getStore } from '@netlify/blobs';
 import { getSupabaseUser, SUPABASE_URL, SUPABASE_ANON_KEY } from './_supabase-public.mjs';
 
 const cors = {
@@ -58,6 +58,9 @@ export async function handler(event) {
   if (event.httpMethod === 'OPTIONS') return { statusCode: 204, headers: cors, body: '' };
   if (!['GET', 'POST'].includes(event.httpMethod)) return json(405, { error: 'Método não permitido.' });
   try {
+    // Lambda compatibility mode: Netlify does not inject the Blobs environment
+    // automatically into classic exports.handler functions.
+    connectLambda(event);
     const body = event.httpMethod === 'POST' ? JSON.parse(event.body || '{}') : {};
     const id = event.httpMethod === 'GET' ? (event.queryStringParameters?.franchise_id || new URLSearchParams(event.rawQuery || event.rawQueryString || '').get('franchise_id')) : body.franchise_id;
     if (!uuid(id)) return json(400, { error: 'Unidade inválida.' });

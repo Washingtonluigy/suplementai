@@ -1,6 +1,6 @@
 {
   "package": "SuplementaAI",
-  "version": "V52.31",
+  "version": "V52.32",
   "frontend": "site",
   "functions": "netlify/functions",
   "functionsIncluded": [
@@ -11,9 +11,10 @@
     "focus-fiscal.mjs",
     "_focus-credentials.mjs",
     "catalog-hours.mjs",
+    "franchise-team-directory.mjs",
     "customer-edit.mjs"
   ],
   "deployRule": "Upload estático: publique somente dist inteira (index.html na raiz). Regras _redirects habilitam proxy Notaas.",
   "supabaseChanged": false,
-  "generatedAt": "2026-10-27T20:09:07.930Z"
+  "generatedAt": "2026-10-27T20:27:57.870Z"
 }
