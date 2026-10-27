@@ -64,7 +64,11 @@ export async function handler(event) {
     const body = event.httpMethod === 'POST' ? JSON.parse(event.body || '{}') : {};
     const id = event.httpMethod === 'GET' ? (event.queryStringParameters?.franchise_id || new URLSearchParams(event.rawQuery || event.rawQueryString || '').get('franchise_id')) : body.franchise_id;
     if (!uuid(id)) return json(400, { error: 'Unidade inválida.' });
-    const store = getStore({ name: 'suplementaai-catalog-hours', consistency: 'strong' });
+    // Em deploys de dist precompilada, connectLambda fornece o acesso aos Blobs,
+    // mas o ambiente pode não oferecer uncachedEdgeURL para leituras 'strong'.
+    // A consistência eventual é suportada sem essa configuração (até 60s para
+    // propagação de alterações já existentes entre regiões).
+    const store = getStore('suplementaai-catalog-hours');
     const key = `franchise/${id}`;
     if (event.httpMethod === 'POST') {
       if (!(await authorizeUnitManager(event, id))) return json(403, { error: 'Somente a gestão da unidade pode alterar o horário do catálogo.' });
@@ -73,7 +77,7 @@ export async function handler(event) {
       await store.setJSON(key, schedule);
       return json(200, { success: true, schedule, ...evaluateHours(schedule), server_time: new Date().toISOString() });
     }
-    const schedule = (await store.get(key, { type: 'json', consistency: 'strong' })) || defaults();
+    const schedule = (await store.get(key, { type: 'json' })) || defaults();
     return json(200, { success: true, schedule, ...evaluateHours(schedule), server_time: new Date().toISOString() });
   } catch (error) {
     return json(500, { error: error?.message || 'Erro ao acessar o horário do catálogo.' });

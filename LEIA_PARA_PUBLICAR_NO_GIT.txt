@@ -1,4 +1,4 @@
-SUPLEMENTAAI V52.32 - AJUSTES OPERACIONAIS - MODO DIST
+SUPLEMENTAAI V52.33 - AJUSTES OPERACIONAIS - MODO DIST
 
 A pasta dist gerada por npm run build agora possui index.html NA RAIZ, alem de site/.
 Ela contem:
@@ -41,7 +41,7 @@ NOTAAS
 - Arrastar dist em deploy manual Netlify pode NAO publicar Functions; preferir Netlify CLI ou Git.
 
 FOCUS NFE
-- A V52.32 contem tokens de producao e homologacao incorporados SOMENTE nas Netlify Functions por solicitacao expressa do proprietario.
+- A V52.33 contem tokens de producao e homologacao incorporados SOMENTE nas Netlify Functions por solicitacao expressa do proprietario.
 - REPOSITORIO GITHUB PUBLICO: QUALQUER PESSOA CONSEGUE VER E COPIAR OS TOKENS. Nao publique em repositorio publico.
 - Producao: consulta de NF-e recebidas, com XML via distribuicao e possivel manifestacao.
 - Homologacao: emissao de NF-e/NFC-e de teste. Producao so com confirmacao explicita e configuracao fiscal revisada.

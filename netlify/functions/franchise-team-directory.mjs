@@ -28,7 +28,9 @@ export async function handler(event) {
     if (!isUUID(franchiseId)) return json(400, { error: 'Unidade inválida.' });
     // Classically bundled Netlify Functions need the event to obtain Blob credentials.
     connectLambda(event);
-    const store = getStore({ name: 'suplementaai-team-directory', consistency: 'strong' });
+    // O deploy precompilado recebe siteID/token de connectLambda, mas não
+    // uncachedEdgeURL. Use consistência padrão/eventual, disponível nesse modo.
+    const store = getStore('suplementaai-team-directory');
     const key = `franchise/${franchiseId}`;
     if (event.httpMethod === 'POST') {
       // Match the existing verified Master session model. Never accept a roster
@@ -42,7 +44,7 @@ export async function handler(event) {
     }
     const linked = await db(auth, franchiseId, auth.user.id);
     if (!linked.length) return json(403, { error: 'Você não está vinculado a esta franquia.' });
-    const directory = await store.get(key, { type: 'json', consistency: 'strong' });
+    const directory = await store.get(key, { type: 'json' });
     if (!directory || !Array.isArray(directory.users)) return json(200, { success: true, synchronized: false, users: [] });
     // Listing personal information is restricted to the owner or other full managers.
     const member = linked[0];
