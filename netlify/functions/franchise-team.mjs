@@ -26,7 +26,7 @@ const fullAccess = row => !parseProfile(row.phone) || parseProfile(row.phone)?.m
 // Deliberately does not infer authority from client-provided phone/profile/role values.
 export const handler = async event => {
   if (event.httpMethod !== 'POST') return json(405, { error: 'Método não permitido.' });
-  if (!key) return json(503, { error: 'Cadastro de usuários ainda não habilitado neste Netlify: configure SUPABASE_SERVICE_ROLE_KEY apenas nas variáveis de ambiente do Netlify (nunca no frontend). Nenhuma alteração realizada.' });
+  if (!key) return json(503, { code: 'ADMIN_NOT_CONFIGURED', error: 'Cadastro e gestão de logins indisponíveis: credencial administrativa de servidor ausente no Netlify. Nenhuma alteração foi realizada. Não configure essa chave no frontend.' });
   const auth = await getSupabaseUser(event).catch(() => null);
   if (!auth) return json(401, { error: 'Sessão expirada; faça login novamente.' });
   try {
