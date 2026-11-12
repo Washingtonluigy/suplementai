@@ -265,7 +265,9 @@ async function importFood99Order(integration, auth, normalized) {
     status: 'pending',
     order_type: 'public',
     delivery: normalized.delivery,
-    delivery_source: '99food',
+    // O CHECK ja existente no Bolt aceita '99delivery', nao '99food'.
+    // O frontend exibe '99delivery' como 99Food (sem migracao).
+    delivery_source: '99delivery',
     delivery_source_detail: '99FOOD',
     address: normalized.address,
     notes: normalized.notes,
@@ -294,7 +296,7 @@ async function importFood99Order(integration, auth, normalized) {
       items_count: normalized.items.reduce((count, item) => count + item.quantity, 0),
       sale_type: 'counter', campaign_name: null,
       items: normalized.items,
-      delivery_source: '99food', payment_method: normalized.paymentMethod,
+      delivery_source: '99delivery', payment_method: normalized.paymentMethod,
       discount: 0, discount_type: 'fixed', amount_paid: 0,
       change: null, subtotal: normalized.total, delivery_fee: 0,
       delivery_fee_payer: 'customer', installments: null,
