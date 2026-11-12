@@ -5,12 +5,43 @@ export const getOrderInfo = (payload) => payload?.data?.order_info || payload?.o
 export const getOrderId = (payload) => digits(getOrderInfo(payload)?.order_id || getOrderInfo(payload)?.orderId || payload?.data?.order_id || payload?.order_id || payload?.orderId);
 export const getShopId = (payload) => digits(getOrderInfo(payload)?.shop_id || getOrderInfo(payload)?.shopId || payload?.data?.shop_id || payload?.shop_id || payload?.shopId);
 export const getAppShopId = (payload) => digits(getOrderInfo(payload)?.app_shop_id || getOrderInfo(payload)?.appShopId || payload?.data?.app_shop_id || payload?.app_shop_id || payload?.appShopId);
-export const getEventType = (payload) => String(payload?.type || payload?.event_type || payload?.eventType || '').trim();
-export const isNewOrderEvent = (payload) => /^(ordernew|neworder|ordercreated|ordercreate)$/i.test(getEventType(payload).replace(/[-_\s]/g, ''));
+export const getEventType = (payload) => String(payload?.type || payload?.event_type || payload?.eventType || payload?.event || '').trim();
+export const isNewOrderEvent = (payload) => /^(ordernew|neworder|ordercreated|ordercreate)$/i.test(getEventType(payload).replace(/[^a-z0-9]/gi, ''));
 
 export function parseFood99Json(raw) {
   // JSON.parse arredondaria IDs de 64 bits. Protege os campos de IDs antes de fazer parse.
   return JSON.parse(String(raw || '{}').replace(/("(?:app_id|shop_id|order_id|appShopId|shopId|orderId|taskID|taskId|task_id)"\s*:\s*)(\d{16,})(?=\s*[,}\]])/g, '$1"$2"'));
+}
+
+// Alguns provedores e ferramentas Sandbox encapsulam o JSON em PARAM,
+// payload ou body. A fila precisa interpretar o evento real, não o envelope.
+export function unwrapFood99Webhook(value) {
+  let current = value;
+  for (let depth = 0; depth < 4; depth++) {
+    if (typeof current === 'string') {
+      try { current = parseFood99Json(current); } catch { return {}; }
+    }
+    if (!current || typeof current !== 'object' || Array.isArray(current)) return {};
+    const wrapped = ['PARAM', 'param', 'payload', 'body'].find(key => current[key] != null);
+    if (wrapped) {
+      const inner = current[wrapped];
+      try {
+        const parsed = typeof inner === 'string' ? parseFood99Json(inner) : inner;
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          current = parsed;
+          continue;
+        }
+      } catch { /* payload principal permanece válido */ }
+    }
+    // Há callbacks com data ou message codificados como JSON string.
+    for (const field of ['data', 'message']) {
+      if (typeof current[field] === 'string' && /^\s*[\[{]/.test(current[field])) {
+        try { current = { ...current, [field]: parseFood99Json(current[field]) }; } catch { /* manter original */ }
+      }
+    }
+    return current;
+  }
+  return current && typeof current === 'object' ? current : {};
 }
 
 const asNumber = (value) => Number.isFinite(Number(value)) ? Number(value) : 0;

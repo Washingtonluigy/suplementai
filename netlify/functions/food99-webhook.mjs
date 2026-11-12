@@ -1,5 +1,5 @@
 import { connectLambda, getStore } from '@netlify/blobs';
-import { parseFood99Json, getOrderId, getShopId, getAppShopId, getEventType, isNewOrderEvent } from './_food99-orders.mjs';
+import { parseFood99Json, getOrderId, getShopId, getAppShopId, getEventType, isNewOrderEvent, unwrapFood99Webhook } from './_food99-orders.mjs';
 
 const json = (statusCode, body) => ({
   statusCode,
@@ -48,7 +48,7 @@ export async function handler(event) {
     // precisam ser inicializados a partir do evento. Não exige token manual.
     connectLambda(event);
     let payload = {};
-    try { payload = parseFood99Json(event.body || '{}'); } catch { return json(400, { ok: false, error: 'Invalid JSON' }); }
+    try { payload = unwrapFood99Webhook(parseFood99Json(event.body || '{}')); } catch { return json(400, { ok: false, error: 'Invalid JSON' }); }
     const bodyChallenge = firstString(payload, ['challenge', 'echo', 'echostr', 'data.challenge']);
     if (bodyChallenge && !firstString(payload, ['orderId', 'order.id', 'data.orderId', 'data.order.id', 'eventId', 'event_id'])) {
       return { statusCode: 200, headers: { 'content-type': 'text/plain; charset=utf-8' }, body: bodyChallenge };
@@ -91,6 +91,11 @@ export async function handler(event) {
         orderId, shopId: callbackShop, appShopId: callbackAppShop,
         eventType: getEventType(payload), receivedAt: new Date().toISOString(),
         // Sem PII no registro da fila; detalhes são recuperados do provedor.
+      });
+      // Diagnóstico não sensível por loja, disponível apenas após autenticação.
+      await store.setJSON(`diagnostics/${safeShop}.json`, {
+        eventType: getEventType(payload), receivedAt: new Date().toISOString(),
+        orderQueued: true,
       });
     }
 

@@ -310,6 +310,7 @@ async function pollFood99Orders(integration, auth) {
   const prefix = `orders/${shopId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 80)}/`;
   const listed = await store.list({ prefix });
   const pending = (listed?.blobs || []).slice(0, 20);
+  const lastWebhook = await store.get(`diagnostics/${shopId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 80)}.json`, { type: 'json' }).catch(() => null);
   let imported = 0;
   let duplicate = 0;
   const errors = [];
@@ -337,9 +338,12 @@ async function pollFood99Orders(integration, auth) {
   return {
     ok: errors.length === 0, imported, duplicate,
     pending: pending.length, failed: errors.length, errors,
+    lastWebhook: lastWebhook?.receivedAt || null,
     message: errors.length
       ? `99Food: ${imported} importado(s), ${errors.length} pendente(s) por erro. ${errors[0].message}`
-      : `99Food: ${imported} pedido(s) importado(s), ${duplicate} já existente(s).`,
+      : pending.length === 0
+        ? `99Food: fila vazia para esta loja. ${lastWebhook?.receivedAt ? `Último evento de pedido: ${lastWebhook.receivedAt}.` : 'Não há evento de novo pedido registrado.'} Consulte pelo ID do pedido para buscar direto na 99Food.`
+        : `99Food: ${imported} pedido(s) importado(s), ${duplicate} já existente(s).`,
   };
 }
 
@@ -390,6 +394,28 @@ export async function handler(event) {
     if (action === 'poll_orders') {
       const result = await pollFood99Orders(integration, auth);
       return json(result.failed ? 207 : 200, result);
+    }
+
+    if (action === 'import_order_by_id') {
+      // Recuperação manual pelo ID exibido no Sandbox. Não depende da fila
+      // nem confia nos dados enviados pelo navegador; busca autenticada na 99Food.
+      const orderId = String(body?.order_id || '').trim();
+      if (!/^\d{8,24}$/.test(orderId)) return json(400, { ok: false, error: 'Informe o ID numérico completo do pedido da 99Food.' });
+      const shopId = String(integration.store_id || '').trim();
+      const appShopId = String(integration.food99?.appShopId || '').trim();
+      if (!shopId || !appShopId) return json(400, { ok: false, error: 'Informe o Shop ID e AppShopID da loja vinculada.' });
+      const detail = await getFood99OrderDetail(integration, auth, orderId);
+      const normalized = normalizeFood99Order(detail, orderId);
+      if (normalized.shopId !== shopId) return json(403, { ok: false, error: 'A 99Food devolveu um pedido de outra loja. Nenhuma venda foi criada.' });
+      if (normalized.appShopId && normalized.appShopId !== appShopId) return json(403, { ok: false, error: 'O AppShopID do pedido não pertence a esta integração.' });
+      const created = await importFood99Order(integration, auth, normalized);
+      const safeShop = shopId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 80);
+      const safeId = orderId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 80);
+      await getStore('suplementaai-99food').delete(`orders/${safeShop}/${safeId}.json`).catch(() => null);
+      return json(200, {
+        ok: true, imported: created ? 1 : 0, duplicate: created ? 0 : 1, orderId,
+        message: created ? `Pedido 99Food #${orderId} importado. Confira Pedidos online.` : `Pedido 99Food #${orderId} já estava cadastrado.`,
+      });
     }
 
     if (action === 'status') {
