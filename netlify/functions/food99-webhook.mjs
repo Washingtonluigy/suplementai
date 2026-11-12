@@ -1,4 +1,4 @@
-import { getStore } from '@netlify/blobs';
+import { connectLambda, getStore } from '@netlify/blobs';
 import { parseFood99Json, getOrderId, getShopId, getAppShopId, getEventType, isNewOrderEvent } from './_food99-orders.mjs';
 
 const json = (statusCode, body) => ({
@@ -44,6 +44,9 @@ export async function handler(event) {
   if (event.httpMethod !== 'POST') return json(405, { ok: false, error: 'Method not allowed' });
 
   try {
+    // No formato Lambda (export handler), os dados de acesso ao Netlify Blobs
+    // precisam ser inicializados a partir do evento. Não exige token manual.
+    connectLambda(event);
     let payload = {};
     try { payload = parseFood99Json(event.body || '{}'); } catch { return json(400, { ok: false, error: 'Invalid JSON' }); }
     const bodyChallenge = firstString(payload, ['challenge', 'echo', 'echostr', 'data.challenge']);
@@ -58,7 +61,7 @@ export async function handler(event) {
     const storeId = firstString(payload, ['storeId','store_id','shopId','shop_id','merchantId','merchant_id','restaurantId','restaurant_id','data.storeId','data.store_id','data.shopId','data.shop_id','data.merchantId','data.merchant_id','order.storeId','order.shopId','data.order.storeId','data.order.shopId']);
     const appShopId = firstString(payload, ['appShopId','app_shop_id','APPShopID','data.appShopId','data.app_shop_id','data.APPShopID','shop.appShopId','data.shop.appShopId']);
 
-    const store = getStore({ name: 'suplementaai-99food', consistency: 'strong' });
+    const store = getStore('suplementaai-99food');
     const safeEventId = String(eventId).replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 180);
     await store.setJSON(`events/${Date.now()}-${safeEventId}.json`, {
       eventId,

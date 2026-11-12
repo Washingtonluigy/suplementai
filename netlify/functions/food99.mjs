@@ -1,5 +1,5 @@
 import { SUPABASE_URL, SUPABASE_ANON_KEY, getSupabaseUser } from './_supabase-public.mjs';
-import { getStore } from '@netlify/blobs';
+import { connectLambda, getStore } from '@netlify/blobs';
 import { normalizeFood99Order, getOrderInfo, getOrderId, getShopId, parseFood99Json } from './_food99-orders.mjs';
 
 const json = (statusCode, body) => ({
@@ -209,7 +209,7 @@ function extractExactIntegerField(rawJson, fieldNames = []) {
 
 async function latestBlobStatus({ integrationId, taskId, shopId, appShopId }) {
   try {
-    const store = getStore({ name: 'suplementaai-99food', consistency: 'strong' });
+    const store = getStore('suplementaai-99food');
     const keys = [
       integrationId ? `menu-status/${integrationId}.json` : '',
       taskId ? `menu-task/${taskId}.json` : '',
@@ -217,7 +217,7 @@ async function latestBlobStatus({ integrationId, taskId, shopId, appShopId }) {
       appShopId ? `menu-appshop/${appShopId}.json` : '',
     ].filter(Boolean);
     for (const key of keys) {
-      const value = await store.get(key, { type: 'json', consistency: 'strong' }).catch(() => null);
+      const value = await store.get(key, { type: 'json' }).catch(() => null);
       if (value) return value;
     }
     return null;
@@ -306,7 +306,7 @@ async function pollFood99Orders(integration, auth) {
   const shopId = String(integration.store_id || '').trim();
   const appShopId = String(integration.food99?.appShopId || '').trim();
   if (!shopId || !appShopId) throw new Error('Preencha o Shop ID e AppShopID corretos da loja 99Food.');
-  const store = getStore({ name: 'suplementaai-99food', consistency: 'strong' });
+  const store = getStore('suplementaai-99food');
   const prefix = `orders/${shopId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 80)}/`;
   const listed = await store.list({ prefix });
   const pending = (listed?.blobs || []).slice(0, 20);
@@ -316,7 +316,7 @@ async function pollFood99Orders(integration, auth) {
   for (const item of pending) {
     const key = item.key;
     try {
-      const queued = await store.get(key, { type: 'json', consistency: 'strong' });
+      const queued = await store.get(key, { type: 'json' });
       if (!queued || String(queued.shopId) !== shopId || String(queued.appShopId) !== appShopId) {
         throw new Error('Evento pertence a outra loja ou AppShopID.');
       }
@@ -351,6 +351,9 @@ export async function handler(event) {
   if (!auth) return json(401, { ok: false, error: 'Sessão obrigatória.' });
 
   try {
+    // Mesma inicialização utilizada pelas outras Functions legadas deste projeto.
+    // Evita MissingBlobsEnvironmentError sem variáveis no Netlify.
+    connectLambda(event);
     const body = JSON.parse(event.body || '{}');
     const action = String(body?.action || '');
     const integrationId = String(body?.integration_id || '').trim();
@@ -374,11 +377,11 @@ export async function handler(event) {
 
     if (action === 'storage_health') {
       // Teste real de leitura/escrita na mesma fila que recebe o callback.
-      const store = getStore({ name: 'suplementaai-99food', consistency: 'strong' });
+      const store = getStore('suplementaai-99food');
       const key = `health/${integration.id}.json`;
       const sample = { timestamp: Date.now(), integrationId: integration.id };
       await store.setJSON(key, sample);
-      const recovered = await store.get(key, { type: 'json', consistency: 'strong' });
+      const recovered = await store.get(key, { type: 'json' });
       await store.delete(key);
       if (recovered?.integrationId !== integration.id) throw new Error('Netlify Blobs não confirmou a leitura/escrita da fila 99Food.');
       return json(200, { ok: true, message: 'Fila 99Food disponível para guardar e recuperar notificações.' });
