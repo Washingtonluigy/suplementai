@@ -1,6 +1,6 @@
 import { SUPABASE_URL, SUPABASE_ANON_KEY, getSupabaseUser } from './_supabase-public.mjs';
 import { connectLambda, getStore } from '@netlify/blobs';
-import { normalizeFood99Order, getOrderInfo, getOrderId, getShopId, parseFood99Json } from './_food99-orders.mjs';
+import { normalizeFood99Order, getOrderInfo, getOrderId, getShopId, parseFood99Json, verifyFood99OrderShop } from './_food99-orders.mjs';
 
 const json = (statusCode, body) => ({
   statusCode,
@@ -242,7 +242,10 @@ async function getFood99OrderDetail(integration, auth, orderId) {
   }
   const detail = getOrderInfo(data) || data?.data;
   if (!detail || !getOrderId(data)) throw new Error('A 99Food não retornou os detalhes completos do pedido.');
-  return detail;
+  // Preservar o envelope autenticado: shop_id/AppShopID podem ficar em data
+  // enquanto os produtos ficam em order_info. Ao descartar o envelope, o
+  // validador interpretava falsamente a ausência como "pedido de outra loja".
+  return data;
 }
 
 async function importFood99Order(integration, auth, normalized) {
@@ -325,8 +328,8 @@ async function pollFood99Orders(integration, auth) {
       // uma venda. Consultamos o pedido na API autenticada da 99Food.
       const detail = await getFood99OrderDetail(integration, auth, queued.orderId);
       const normalized = normalizeFood99Order(detail, queued.orderId);
-      if (!normalized.shopId || normalized.shopId !== shopId) throw new Error('A API 99Food devolveu pedido de outra loja.');
-      if (normalized.appShopId && normalized.appShopId !== appShopId) throw new Error('A API 99Food devolveu outro AppShopID.');
+      const shopVerification = verifyFood99OrderShop(normalized, shopId, appShopId);
+      if (!shopVerification.ok) throw new Error(shopVerification.message);
       const created = await importFood99Order(integration, auth, normalized);
       if (created) imported += 1;
       else duplicate += 1;
@@ -406,8 +409,10 @@ export async function handler(event) {
       if (!shopId || !appShopId) return json(400, { ok: false, error: 'Informe o Shop ID e AppShopID da loja vinculada.' });
       const detail = await getFood99OrderDetail(integration, auth, orderId);
       const normalized = normalizeFood99Order(detail, orderId);
-      if (normalized.shopId !== shopId) return json(403, { ok: false, error: 'A 99Food devolveu um pedido de outra loja. Nenhuma venda foi criada.' });
-      if (normalized.appShopId && normalized.appShopId !== appShopId) return json(403, { ok: false, error: 'O AppShopID do pedido não pertence a esta integração.' });
+      const shopVerification = verifyFood99OrderShop(normalized, shopId, appShopId);
+      if (!shopVerification.ok) return json(shopVerification.code === 'SHOP_ID_NOT_RETURNED' ? 422 : 403, {
+        ok: false, code: shopVerification.code, error: shopVerification.message,
+      });
       const created = await importFood99Order(integration, auth, normalized);
       const safeShop = shopId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 80);
       const safeId = orderId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 80);

@@ -1,16 +1,117 @@
 // Normalização de dados 99Food. Não usa credenciais nem acesso ao banco.
 // IDs numéricos da 99Food devem ser preservados como strings (int64).
-export const digits = (value) => String(value ?? '').trim();
-export const getOrderInfo = (payload) => payload?.data?.order_info || payload?.order_info || payload?.data?.orderInfo || payload?.orderInfo || payload?.data?.order || payload?.order || null;
-export const getOrderId = (payload) => digits(getOrderInfo(payload)?.order_id || getOrderInfo(payload)?.orderId || payload?.data?.order_id || payload?.order_id || payload?.orderId);
-export const getShopId = (payload) => digits(getOrderInfo(payload)?.shop_id || getOrderInfo(payload)?.shopId || payload?.data?.shop_id || payload?.shop_id || payload?.shopId);
-export const getAppShopId = (payload) => digits(getOrderInfo(payload)?.app_shop_id || getOrderInfo(payload)?.appShopId || payload?.data?.app_shop_id || payload?.app_shop_id || payload?.appShopId);
+export const digits = (value) => typeof value === 'string' || typeof value === 'number' || typeof value === 'bigint'
+  ? String(value).trim() : '';
+
+// A 99Food devolve dados em envelopes diferentes entre callbacks, Sandbox e
+// consulta de detalhes. Procurar apenas em order_info.shop_id confunde campo
+// ausente com pedido de outra loja. Nunca inferir um ID vindo do navegador.
+const ORDER_WRAPPERS = ['order_info', 'orderInfo', 'order', 'order_detail', 'orderDetail', 'detail'];
+const CONTAINER_WRAPPERS = ['data', 'result', 'response'];
+const SHOP_WRAPPERS = ['shop_info', 'shopInfo', 'shop', 'store_info', 'storeInfo', 'store'];
+const ORDER_ID_KEYS = ['order_id', 'orderId', 'orderID'];
+const SHOP_ID_KEYS = ['shop_id', 'shopId', 'shopID', 'store_id', 'storeId'];
+const APP_SHOP_ID_KEYS = ['app_shop_id', 'appShopId', 'appShopID', 'APPShopID', 'APPShopId'];
+
+function parsedObject(value) {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value;
+  if (typeof value === 'string' && /^\s*\{/.test(value)) {
+    try {
+      const parsed = parseFood99Json(value);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+    } catch { return null; }
+  }
+  return null;
+}
+
+function findIdentityValue(payload, names, { allowShopObjectId = false } = {}) {
+  const root = parsedObject(payload);
+  if (!root) return '';
+  const visited = new Set();
+  const search = (node, depth) => {
+    const object = parsedObject(node);
+    if (!object || depth > 5 || visited.has(object)) return '';
+    visited.add(object);
+    // O ID mais próximo dos dados do próprio pedido tem precedência sobre
+    // metadados da resposta. Não aceitar um ID arbitrário do corpo da requisição.
+    for (const key of ORDER_WRAPPERS) {
+      const value = search(object[key], depth + 1);
+      if (value) return value;
+    }
+    for (const key of names) {
+      const value = digits(object[key]);
+      if (value) return value;
+    }
+    if (allowShopObjectId) {
+      for (const key of SHOP_WRAPPERS) {
+        const shop = parsedObject(object[key]);
+        if (!shop) continue;
+        for (const name of [...names, 'id']) {
+          const id = digits(shop[name]);
+          if (id) return id;
+        }
+      }
+    }
+    for (const key of CONTAINER_WRAPPERS) {
+      const value = search(object[key], depth + 1);
+      if (value) return value;
+    }
+    return '';
+  };
+  return search(root, 0);
+}
+
+export const getOrderInfo = (payload) => {
+  const root = parsedObject(payload);
+  if (!root) return null;
+  const scan = (node, depth) => {
+    const obj = parsedObject(node);
+    if (!obj || depth > 4) return null;
+    for (const key of ORDER_WRAPPERS) {
+      const order = parsedObject(obj[key]);
+      if (order) return order;
+    }
+    for (const key of CONTAINER_WRAPPERS) {
+      const found = scan(obj[key], depth + 1);
+      if (found) return found;
+    }
+    return null;
+  };
+  return scan(root, 0);
+};
+export const getOrderId = (payload) => findIdentityValue(payload, ORDER_ID_KEYS);
+export const getShopId = (payload) => findIdentityValue(payload, SHOP_ID_KEYS, { allowShopObjectId: true });
+export const getAppShopId = (payload) => findIdentityValue(payload, APP_SHOP_ID_KEYS);
+
+// Um pedido com IDs expressamente diferentes deve ser recusado. Quando a API
+// omite shop_id, o AppShopID devolvido PELA PRÓPRIA API autenticada precisa
+// corresponder à loja. Nunca aceitar ausência de ambos os identificadores.
+export function verifyFood99OrderShop(normalized, expectedShopId, expectedAppShopId) {
+  const expectedShop = digits(expectedShopId);
+  const expectedAppShop = digits(expectedAppShopId);
+  const actualShop = digits(normalized?.shopId);
+  const actualAppShop = digits(normalized?.appShopId);
+  if (!expectedShop || !expectedAppShop) return { ok: false, code: 'MISSING_CONFIG', message: 'Configure o Shop ID e o AppShopID desta loja.' };
+  if (actualShop && actualShop !== expectedShop) return {
+    ok: false, code: 'SHOP_MISMATCH',
+    message: `Shop ID diferente: configurado ${expectedShop}, retornado pela 99Food ${actualShop}. Nenhuma venda foi criada.`,
+  };
+  if (actualAppShop && actualAppShop !== expectedAppShop) return {
+    ok: false, code: 'APP_SHOP_MISMATCH',
+    message: `AppShopID diferente: configurado ${expectedAppShop}, retornado pela 99Food ${actualAppShop}. Nenhuma venda foi criada.`,
+  };
+  if (!actualShop && !actualAppShop) return {
+    ok: false, code: 'SHOP_ID_NOT_RETURNED',
+    message: 'A 99Food não informou Shop ID nem AppShopID nos detalhes autenticados. Não foi possível confirmar a loja; nenhuma venda foi criada.',
+  };
+  return { ok: true, code: actualShop ? 'MATCH_SHOP_ID' : 'MATCH_APP_SHOP_ID' };
+}
 export const getEventType = (payload) => String(payload?.type || payload?.event_type || payload?.eventType || payload?.event || '').trim();
 export const isNewOrderEvent = (payload) => /^(ordernew|neworder|ordercreated|ordercreate)$/i.test(getEventType(payload).replace(/[^a-z0-9]/gi, ''));
 
 export function parseFood99Json(raw) {
   // JSON.parse arredondaria IDs de 64 bits. Protege os campos de IDs antes de fazer parse.
-  return JSON.parse(String(raw || '{}').replace(/("(?:app_id|shop_id|order_id|appShopId|shopId|orderId|taskID|taskId|task_id)"\s*:\s*)(\d{16,})(?=\s*[,}\]])/g, '$1"$2"'));
+  return JSON.parse(String(raw || '{}').replace(/("(?:app_id|shop_id|order_id|appShopId|appShopID|shopId|shopID|orderId|orderID|store_id|storeId|taskID|taskId|task_id)"\s*:\s*)(\d{16,})(?=\s*[,}\]])/g, '$1"$2"'));
 }
 
 // Alguns provedores e ferramentas Sandbox encapsulam o JSON em PARAM,
@@ -47,9 +148,9 @@ export function unwrapFood99Webhook(value) {
 const asNumber = (value) => Number.isFinite(Number(value)) ? Number(value) : 0;
 const money = (value) => Math.max(0, asNumber(value) / 100);
 export function normalizeFood99Order(info, orderId) {
-  const data = info?.order_info || info;
+  const data = getOrderInfo(info) || info?.data?.data || info?.data || info;
   if (!data || typeof data !== 'object') throw new Error('99Food não retornou detalhes do pedido.');
-  const id = digits(data.order_id || data.orderId || orderId);
+  const id = getOrderId(info) || digits(orderId);
   if (!id || id !== digits(orderId)) throw new Error('99Food retornou um identificador diferente do pedido solicitado.');
   const sourceItems = data.order_items || data.orderItems || data.items;
   if (!Array.isArray(sourceItems) || sourceItems.length === 0) throw new Error('Pedido 99Food ainda não possui itens válidos.');
@@ -77,7 +178,7 @@ export function normalizeFood99Order(info, orderId) {
   const timestamp = asNumber(data.create_time ?? data.created_at ?? data.createdAt);
   const createdAt = timestamp > 1000000000 ? new Date(timestamp > 1000000000000 ? timestamp : timestamp * 1000).toISOString() : new Date().toISOString();
   return {
-    id, shopId: digits(data.shop_id || data.shopId), appShopId: digits(data.app_shop_id || data.appShopId),
+    id, shopId: getShopId(info), appShopId: getAppShopId(info),
     customer: String(recipient.name || recipient.first_name || 'Cliente 99Food'),
     phone: String(recipient.phone || recipient.calling_code || '').slice(0, 50),
     items, total: total || items.reduce((acc, item) => acc + item.total_price, 0),

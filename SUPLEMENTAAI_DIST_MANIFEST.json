@@ -16,5 +16,5 @@
   ],
   "deployRule": "Upload estático: publique somente dist inteira (index.html na raiz). Regras _redirects habilitam proxy Notaas.",
   "supabaseChanged": false,
-  "generatedAt": "2026-11-12T19:32:58.244Z"
+  "generatedAt": "2026-11-12T19:48:36.734Z"
 }
