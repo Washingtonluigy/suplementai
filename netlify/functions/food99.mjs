@@ -1,5 +1,6 @@
 import { SUPABASE_URL, SUPABASE_ANON_KEY, getSupabaseUser } from './_supabase-public.mjs';
 import { getStore } from '@netlify/blobs';
+import { normalizeFood99Order, getOrderInfo, getOrderId, getShopId, parseFood99Json } from './_food99-orders.mjs';
 
 const json = (statusCode, body) => ({
   statusCode,
@@ -225,6 +226,123 @@ async function latestBlobStatus({ integrationId, taskId, shopId, appShopId }) {
   }
 }
 
+// Eventos de pedidos 99Food persistidos pelo webhook. Somente usuários da
+// franquia vinculada à integração podem consultar e importar esses pedidos.
+async function getFood99OrderDetail(integration, auth, orderId) {
+  const authInfo = await getValidFood99AuthToken(integration, auth);
+  const params = new URLSearchParams({ auth_token: authInfo.token, order_id: orderId });
+  const remoteResponse = await fetch(`https://openapi.99food.com/v1/order/order/detail?${params.toString()}`, {
+    method: 'GET', headers: { Accept: 'application/json', 'Cache-Control': 'no-store' },
+  });
+  const raw = await remoteResponse.text();
+  let data;
+  try { data = parseFood99Json(raw); } catch { throw new Error(`99Food retornou detalhes inválidos (HTTP ${remoteResponse.status}).`); }
+  if (!remoteResponse.ok || Number(data?.errno ?? -1) !== 0) {
+    throw new Error(`Não foi possível confirmar pedido na API da 99Food (HTTP ${remoteResponse.status}): ${String(data?.errmsg || data?.message || `errno ${data?.errno ?? 'desconhecido'}`).slice(0, 180)}`);
+  }
+  const detail = getOrderInfo(data) || data?.data;
+  if (!detail || !getOrderId(data)) throw new Error('A 99Food não retornou os detalhes completos do pedido.');
+  return detail;
+}
+
+async function importFood99Order(integration, auth, normalized) {
+  const platformOrderId = normalized.id;
+  const filter = `franchise_id=eq.${encodeURIComponent(integration.franchise_id)}&platform_order_id=eq.${encodeURIComponent(platformOrderId)}&limit=1`;
+  const existing = await sbGet(`customer_orders?select=id&${filter}`, auth.token);
+  if (existing?.length) return false;
+
+  // Exatamente o mesmo modelo de pedidos utilizado pelo iFood. A importação
+  // passa pelo JWT da franquia, respeitando as políticas já existentes.
+  const payload = {
+    franchise_id: integration.franchise_id,
+    customer_name: normalized.customer,
+    customer_phone: normalized.phone || null,
+    items: normalized.items,
+    total: normalized.total,
+    status: 'pending',
+    order_type: 'public',
+    delivery: normalized.delivery,
+    delivery_source: '99food',
+    delivery_source_detail: '99FOOD',
+    address: normalized.address,
+    notes: normalized.notes,
+    order_mode: normalized.delivery ? 'delivery' : 'pickup',
+    payment_method: normalized.paymentMethod,
+    discount_amount: 0,
+    subtotal: normalized.total,
+    delivery_fee: 0,
+    delivery_payment_method: 'on_delivery',
+    delivery_fee_payer: 'customer',
+    platform_order_id: platformOrderId,
+    created_at: normalized.createdAt,
+  };
+  try {
+    await sbInsert('customer_orders', payload, auth.token);
+  } catch (error) {
+    // Se outra aba registrou o mesmo pedido, não duplique.
+    const concurrent = await sbGet(`customer_orders?select=id&${filter}`, auth.token).catch(() => []);
+    if (concurrent?.length) return false;
+    throw error;
+  }
+  try {
+    await sbInsert('sales', {
+      franchise_id: integration.franchise_id,
+      total: normalized.total,
+      items_count: normalized.items.reduce((count, item) => count + item.quantity, 0),
+      sale_type: 'counter', campaign_name: null,
+      items: normalized.items,
+      delivery_source: '99food', payment_method: normalized.paymentMethod,
+      discount: 0, discount_type: 'fixed', amount_paid: 0,
+      change: null, subtotal: normalized.total, delivery_fee: 0,
+      delivery_fee_payer: 'customer', installments: null,
+    }, auth.token);
+  } catch (error) {
+    console.warn('[99Food] pedido gravado, mas espelho de vendas falhou:', error?.message || String(error));
+  }
+  return true;
+}
+
+async function pollFood99Orders(integration, auth) {
+  const shopId = String(integration.store_id || '').trim();
+  const appShopId = String(integration.food99?.appShopId || '').trim();
+  if (!shopId || !appShopId) throw new Error('Preencha o Shop ID e AppShopID corretos da loja 99Food.');
+  const store = getStore({ name: 'suplementaai-99food', consistency: 'strong' });
+  const prefix = `orders/${shopId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 80)}/`;
+  const listed = await store.list({ prefix });
+  const pending = (listed?.blobs || []).slice(0, 20);
+  let imported = 0;
+  let duplicate = 0;
+  const errors = [];
+  for (const item of pending) {
+    const key = item.key;
+    try {
+      const queued = await store.get(key, { type: 'json', consistency: 'strong' });
+      if (!queued || String(queued.shopId) !== shopId || String(queued.appShopId) !== appShopId) {
+        throw new Error('Evento pertence a outra loja ou AppShopID.');
+      }
+      // Segurança: um POST recebido na URL pública NÃO é suficiente para gerar
+      // uma venda. Consultamos o pedido na API autenticada da 99Food.
+      const detail = await getFood99OrderDetail(integration, auth, queued.orderId);
+      const normalized = normalizeFood99Order(detail, queued.orderId);
+      if (!normalized.shopId || normalized.shopId !== shopId) throw new Error('A API 99Food devolveu pedido de outra loja.');
+      if (normalized.appShopId && normalized.appShopId !== appShopId) throw new Error('A API 99Food devolveu outro AppShopID.');
+      const created = await importFood99Order(integration, auth, normalized);
+      if (created) imported += 1;
+      else duplicate += 1;
+      await store.delete(key);
+    } catch (error) {
+      errors.push({ orderId: item.key.split('/').pop()?.replace(/\.json$/, '') || '', message: String(error?.message || error).slice(0, 240) });
+    }
+  }
+  return {
+    ok: errors.length === 0, imported, duplicate,
+    pending: pending.length, failed: errors.length, errors,
+    message: errors.length
+      ? `99Food: ${imported} importado(s), ${errors.length} pendente(s) por erro. ${errors[0].message}`
+      : `99Food: ${imported} pedido(s) importado(s), ${duplicate} já existente(s).`,
+  };
+}
+
 export async function handler(event) {
   if (event.httpMethod === 'OPTIONS') return json(204, {});
   if (event.httpMethod !== 'POST') return json(405, { ok: false, error: 'Method not allowed' });
@@ -252,6 +370,23 @@ export async function handler(event) {
         tokenExpirationTime: authInfo.expiration,
         refreshed: Boolean(authInfo.refreshed),
       });
+    }
+
+    if (action === 'storage_health') {
+      // Teste real de leitura/escrita na mesma fila que recebe o callback.
+      const store = getStore({ name: 'suplementaai-99food', consistency: 'strong' });
+      const key = `health/${integration.id}.json`;
+      const sample = { timestamp: Date.now(), integrationId: integration.id };
+      await store.setJSON(key, sample);
+      const recovered = await store.get(key, { type: 'json', consistency: 'strong' });
+      await store.delete(key);
+      if (recovered?.integrationId !== integration.id) throw new Error('Netlify Blobs não confirmou a leitura/escrita da fila 99Food.');
+      return json(200, { ok: true, message: 'Fila 99Food disponível para guardar e recuperar notificações.' });
+    }
+
+    if (action === 'poll_orders') {
+      const result = await pollFood99Orders(integration, auth);
+      return json(result.failed ? 207 : 200, result);
     }
 
     if (action === 'status') {

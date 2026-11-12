@@ -1,4 +1,5 @@
 import { getStore } from '@netlify/blobs';
+import { parseFood99Json, getOrderId, getShopId, getAppShopId, getEventType, isNewOrderEvent } from './_food99-orders.mjs';
 
 const json = (statusCode, body) => ({
   statusCode,
@@ -44,7 +45,7 @@ export async function handler(event) {
 
   try {
     let payload = {};
-    try { payload = JSON.parse(event.body || '{}'); } catch { payload = { rawBody: event.body || '' }; }
+    try { payload = parseFood99Json(event.body || '{}'); } catch { return json(400, { ok: false, error: 'Invalid JSON' }); }
     const bodyChallenge = firstString(payload, ['challenge', 'echo', 'echostr', 'data.challenge']);
     if (bodyChallenge && !firstString(payload, ['orderId', 'order.id', 'data.orderId', 'data.order.id', 'eventId', 'event_id'])) {
       return { statusCode: 200, headers: { 'content-type': 'text/plain; charset=utf-8' }, body: bodyChallenge };
@@ -70,6 +71,26 @@ export async function handler(event) {
       receivedAt: new Date().toISOString(),
     });
 
+    // Novo pedido: guardar na fila por loja. O serviço autenticado irá buscar os
+    // detalhes diretamente na 99Food antes de gravar no banco. Nunca importar
+    // dados recebidos de uma requisição pública sem validação no provedor.
+    if (isNewOrderEvent(payload)) {
+      const orderId = getOrderId(payload);
+      const callbackShop = getShopId(payload);
+      const callbackAppShop = getAppShopId(payload);
+      if (!orderId || !callbackShop || !callbackAppShop) {
+        console.warn('[99Food webhook] callback de pedido incompleto');
+        return json(422, { ok: false, error: 'Order ID/shop ID/appShopID missing' });
+      }
+      const safeShop = callbackShop.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 80);
+      const safeId = orderId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 80);
+      await store.setJSON(`orders/${safeShop}/${safeId}.json`, {
+        orderId, shopId: callbackShop, appShopId: callbackAppShop,
+        eventType: getEventType(payload), receivedAt: new Date().toISOString(),
+        // Sem PII no registro da fila; detalhes são recuperados do provedor.
+      });
+    }
+
     const normalizedType = String(eventType || '').toLowerCase().replace(/[^a-z0-9]/g, '');
     if (normalizedType.includes('uploadmenutaskstatus')) {
       const integrationHint = firstString(payload, ['integrationId','integration_id','data.integrationId','data.integration_id']);
@@ -93,6 +114,7 @@ export async function handler(event) {
     return json(200, { ok: true, success: true, code: 0, errno: 0, message: 'success', received: true, eventId });
   } catch (error) {
     console.error('[99Food webhook]', error);
-    return json(200, { ok: true, success: true, code: 0, message: 'received' });
+    // Não confirmar falsamente uma notificação que não foi persistida.
+    return json(503, { ok: false, error: 'Webhook temporarily unavailable' });
   }
 }
