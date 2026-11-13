@@ -3,7 +3,8 @@
 export const FOOD99_ACTION_ENDPOINTS = Object.freeze({
   confirm: '/v1/order/order/confirm',
   ready: '/v1/order/order/ready',
-  dispatch: '/v1/order/order/dispatch', // Conferir suporte da conta no Sandbox: falha fechada se a API recusar.
+  // Não há chamada de despacho separada validada para este fluxo.
+  // O status 'Em entrega' do Suplementaai é uma etapa operacional interna.
   delivered: '/v1/order/order/delivered',
   cancel: '/v1/order/order/cancel',
 });
@@ -32,7 +33,7 @@ export function planFood99StatusChange(previous, target, { delivery = true } = {
     preparing: null, // Etapa apenas interna; 99Food não disponibiliza API separada de preparo.
     ready: 'ready',
     pickup: 'ready',
-    delivering: 'dispatch',
+    delivering: null, // Etapa interna após Pronto; evita POST /dispatch (404 na conta Sandbox).
     delivered: 'delivered',
     cancelled: 'cancel',
   }[to];

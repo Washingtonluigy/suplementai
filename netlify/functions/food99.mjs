@@ -391,7 +391,9 @@ async function changeFood99OrderStatus(integration, auth, { orderId, expected, n
     status: 'success', message: `${expected} -> ${next}`,
   }, auth.token).catch(error => console.warn('[99Food] Log de status não persistido:', error?.message || error));
   return { ok: true, order: saved, remoteStatus, message: remoteStatus === 'local_only'
-    ? 'Etapa de preparo atualizada no Suplementaai. A 99Food não possui ação remota separada para este status.'
+    ? (next === 'delivering'
+      ? 'Em entrega atualizado no Suplementaai. A 99Food não recebeu uma nova chamada de despacho; confira o status no Sandbox.'
+      : 'Etapa de preparo atualizada no Suplementaai. A 99Food não possui ação remota separada para este status.')
     : `99Food confirmou a ação e o pedido foi atualizado para ${next}.` };
 }
 
