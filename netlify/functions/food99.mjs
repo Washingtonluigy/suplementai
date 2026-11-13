@@ -1,6 +1,7 @@
 import { SUPABASE_URL, SUPABASE_ANON_KEY, getSupabaseUser } from './_supabase-public.mjs';
 import { connectLambda, getStore } from '@netlify/blobs';
 import { normalizeFood99Order, getOrderInfo, getOrderId, getShopId, parseFood99Json, verifyFood99OrderShop } from './_food99-orders.mjs';
+import { FOOD99_ACTION_ENDPOINTS, planFood99StatusChange, parseFood99StatusReply } from './_food99-status.mjs';
 
 const json = (statusCode, body) => ({
   statusCode,
@@ -307,6 +308,86 @@ async function importFood99Order(integration, auth, normalized) {
   return true;
 }
 
+// Autorização de cancelamento: colaborador limitado pode operar a fila, mas
+// cancelar um pedido externo continua reservado à gestão da unidade.
+async function canCancelFood99(auth, franchiseId) {
+  if (auth.user?.user_metadata?.role === 'master') return true;
+  const rows = await sbGet(`franchise_users?select=id,phone,auth_user_id&franchise_id=eq.${encodeURIComponent(franchiseId)}&order=created_at.asc`, auth.token);
+  const requester = (rows || []).find(row => String(row.auth_user_id || '') === String(auth.user.id));
+  if (!requester) return false;
+  if (rows?.[0]?.id === requester.id) return true;
+  const phone = String(requester.phone || '');
+  const marker = '|||SAIACL1:';
+  const pos = phone.indexOf(marker);
+  if (pos < 0) return false;
+  try {
+    const profile = JSON.parse(Buffer.from(phone.slice(pos + marker.length), 'base64').toString('utf8'));
+    return profile?.mode === 'full';
+  } catch { return false; }
+}
+
+async function changeFood99OrderStatus(integration, auth, { orderId, expected, next, confirmationCode = '', cancelReason = '' }) {
+  if (!/^[0-9a-f-]{36}$/i.test(orderId)) throw new Error('Pedido local inválido.');
+  const rows = await sbGet(`customer_orders?select=id,franchise_id,status,delivery,delivery_source,platform_order_id&id=eq.${encodeURIComponent(orderId)}&franchise_id=eq.${encodeURIComponent(integration.franchise_id)}&limit=1`, auth.token);
+  const order = rows?.[0];
+  if (!order || order.delivery_source !== '99delivery' || !/^\d{8,24}$/.test(String(order.platform_order_id || '')))
+    throw new Error('Este pedido não pertence à 99Food desta franquia.');
+  if (order.status !== expected) throw new Error('O status já mudou em outra sessão. Atualize os pedidos.');
+  const plan = planFood99StatusChange(order.status, next, { delivery: order.delivery });
+  if (!plan.ok) throw new Error(plan.message);
+  if (next === 'cancelled' && !(await canCancelFood99(auth, integration.franchise_id)))
+    throw new Error('Somente a gestão pode cancelar pedidos da 99Food.');
+
+  let remoteStatus = 'local_only';
+  if (plan.remote) {
+    const tokenInfo = await getValidFood99AuthToken(integration, auth);
+    const endpoint = FOOD99_ACTION_ENDPOINTS[plan.remote];
+    const payload = { auth_token: tokenInfo.token, order_id: String(order.platform_order_id) };
+    if (plan.remote === 'cancel') {
+      if (!cancelReason.trim()) throw new Error('Informe o motivo do cancelamento do pedido.');
+      payload.reason = cancelReason.trim().slice(0, 200);
+      payload.cancel_reason = cancelReason.trim().slice(0, 200);
+    }
+    if (plan.remote === 'delivered' && confirmationCode.trim()) {
+      if (!/^\d{4,8}$/.test(confirmationCode.trim())) throw new Error('Código de entrega inválido.');
+      payload.verify_code = confirmationCode.trim();
+    }
+    let remote;
+    let httpStatus;
+    try {
+      const result = await fetch(`https://openapi.99food.com${endpoint}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      httpStatus = result.status;
+      const raw = await result.text();
+      remote = raw ? parseFood99Json(raw) : {};
+    } catch (error) {
+      throw new Error(`Não foi possível comunicar com a 99Food: ${error instanceof Error ? error.message : String(error)}. O status local permanece igual.`);
+    }
+    const checked = parseFood99StatusReply(httpStatus, remote);
+    if (!checked.ok) throw new Error(`99Food não confirmou ${next}: ${checked.message}. O status no Suplementaai não foi alterado.`);
+    remoteStatus = 'confirmed';
+  }
+
+  // A alteração local só ocorre após a API remota confirmar (quando aplicável).
+  // O filtro pelo status anterior impede sobrescrever alterações de outro operador.
+  const saved = await sbPatch('customer_orders',
+    `id=eq.${encodeURIComponent(order.id)}&franchise_id=eq.${encodeURIComponent(integration.franchise_id)}&status=eq.${encodeURIComponent(expected)}`,
+    { status: next }, auth.token);
+  if (!saved?.id) throw new Error('A 99Food aceitou a ação, mas o registro local não pôde ser atualizado. Atualize a página e confira os dois status antes de tentar novamente.');
+  const logAction = next === 'cancelled' ? 'order_cancel' : next === 'accepted' ? 'order_accept' : 'status_update';
+  await sbInsert('delivery_sync_logs', {
+    integration_id: integration.id, action: logAction, platform_order_id: String(order.platform_order_id),
+    payload: { provider: '99food', previous: expected, next, remote_status: remoteStatus },
+    status: 'success', message: `${expected} -> ${next}`,
+  }, auth.token).catch(error => console.warn('[99Food] Log de status não persistido:', error?.message || error));
+  return { ok: true, order: saved, remoteStatus, message: remoteStatus === 'local_only'
+    ? 'Etapa de preparo atualizada no Suplementaai. A 99Food não possui ação remota separada para este status.'
+    : `99Food confirmou a ação e o pedido foi atualizado para ${next}.` };
+}
+
 async function pollFood99Orders(integration, auth) {
   const shopId = String(integration.store_id || '').trim();
   const appShopId = String(integration.food99?.appShopId || '').trim();
@@ -394,6 +475,16 @@ export async function handler(event) {
       await store.delete(key);
       if (recovered?.integrationId !== integration.id) throw new Error('Netlify Blobs não confirmou a leitura/escrita da fila 99Food.');
       return json(200, { ok: true, message: 'Fila 99Food disponível para guardar e recuperar notificações.' });
+    }
+
+    if (action === 'change_order_status') {
+      const orderId = String(body?.local_order_id || '').trim();
+      const expected = String(body?.expected_status || '').trim();
+      const next = String(body?.next_status || '').trim();
+      const confirmationCode = String(body?.confirmation_code || '').trim();
+      const cancelReason = String(body?.cancel_reason || '').trim();
+      const result = await changeFood99OrderStatus(integration, auth, { orderId, expected, next, confirmationCode, cancelReason });
+      return json(200, result);
     }
 
     if (action === 'poll_orders') {
