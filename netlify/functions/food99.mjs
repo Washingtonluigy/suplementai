@@ -2,6 +2,7 @@ import { SUPABASE_URL, SUPABASE_ANON_KEY, getSupabaseUser } from './_supabase-pu
 import { connectLambda, getStore } from '@netlify/blobs';
 import { normalizeFood99Order, getOrderInfo, getOrderId, getShopId, parseFood99Json, verifyFood99OrderShop } from './_food99-orders.mjs';
 import { FOOD99_ACTION_ENDPOINTS, planFood99StatusChange, parseFood99StatusReply } from './_food99-status.mjs';
+import { normalizeFood99CancellationReasons } from './_food99-cancel-reasons.mjs';
 
 const json = (statusCode, body) => ({
   statusCode,
@@ -249,6 +250,37 @@ async function getFood99OrderDetail(integration, auth, orderId) {
   return data;
 }
 
+// Consulta SOMENTE LEITURA; não cancela ao carregar os motivos.
+// O detalhe do pedido é o primeiro local onde procuramos motivos com IDs.
+// O endpoint adicional é uma tentativa de descoberta, ainda dependente de
+// confirmação no Sandbox/contrato oficial da conta 99Food.
+async function getFood99CancellationReasons(integration, auth, order) {
+  const detail = await getFood99OrderDetail(integration, auth, String(order.platform_order_id));
+  const normalized = normalizeFood99Order(detail, String(order.platform_order_id));
+  const shopCheck = verifyFood99OrderShop(normalized, String(integration.store_id || ''), String(integration.food99?.appShopId || ''));
+  if (!shopCheck.ok) throw new Error(`Não foi possível confirmar a loja do pedido na 99Food: ${shopCheck.message}`);
+  let reasons = normalizeFood99CancellationReasons(detail);
+  if (reasons.length) return reasons;
+
+  const tokenInfo = await getValidFood99AuthToken(integration, auth);
+  const params = new URLSearchParams({ auth_token: tokenInfo.token, order_id: String(order.platform_order_id) });
+  // Consulta exploratória sem efeito de alteração de pedido. Se a conta não
+  // disponibilizar esta rota, NÃO inventamos códigos nem cancelamos.
+  const url = `https://openapi.99food.com/v1/order/order/cancel/reasons?${params.toString()}`;
+  try {
+    const response = await fetch(url, { method: 'GET', headers: { Accept: 'application/json', 'Cache-Control': 'no-store' } });
+    if (response.ok) {
+      const raw = await response.text();
+      const result = raw ? parseFood99Json(raw) : {};
+      if (Number(result?.errno ?? result?.code ?? -1) === 0) {
+        reasons = normalizeFood99CancellationReasons(result);
+        if (reasons.length) return reasons;
+      }
+    }
+  } catch { /* Indisponibilidade de consulta: falhar fechado sem cancelar. */ }
+  throw new Error('A 99Food não disponibilizou IDs de motivos de cancelamento para este pedido. Nenhum cancelamento foi enviado. Precisamos confirmar na documentação da 99Food a rota oficial que lista os motivos (reason_id) para sua conta.');
+}
+
 async function importFood99Order(integration, auth, normalized) {
   const platformOrderId = normalized.id;
   const filter = `franchise_id=eq.${encodeURIComponent(integration.franchise_id)}&platform_order_id=eq.${encodeURIComponent(platformOrderId)}&limit=1`;
@@ -326,7 +358,7 @@ async function canCancelFood99(auth, franchiseId) {
   } catch { return false; }
 }
 
-async function changeFood99OrderStatus(integration, auth, { orderId, expected, next, confirmationCode = '', cancelReason = '' }) {
+async function changeFood99OrderStatus(integration, auth, { orderId, expected, next, confirmationCode = '', cancelReason = '', cancelReasonId = '' }) {
   if (!/^[0-9a-f-]{36}$/i.test(orderId)) throw new Error('Pedido local inválido.');
   const rows = await sbGet(`customer_orders?select=id,franchise_id,status,delivery,delivery_source,platform_order_id&id=eq.${encodeURIComponent(orderId)}&franchise_id=eq.${encodeURIComponent(integration.franchise_id)}&limit=1`, auth.token);
   const order = rows?.[0];
@@ -344,9 +376,15 @@ async function changeFood99OrderStatus(integration, auth, { orderId, expected, n
     const endpoint = FOOD99_ACTION_ENDPOINTS[plan.remote];
     const payload = { auth_token: tokenInfo.token, order_id: String(order.platform_order_id) };
     if (plan.remote === 'cancel') {
-      if (!cancelReason.trim()) throw new Error('Informe o motivo do cancelamento do pedido.');
-      payload.reason = cancelReason.trim().slice(0, 200);
-      payload.cancel_reason = cancelReason.trim().slice(0, 200);
+      // A 99Food exige reason_id numérico. Validar no servidor que o ID veio
+      // da lista retornada pela própria 99Food para ESSE pedido e loja.
+      if (!/^\d{1,12}$/.test(cancelReasonId)) throw new Error('Selecione um motivo de cancelamento da própria 99Food.');
+      const official = await getFood99CancellationReasons(integration, auth, order);
+      const chosen = official.find(item => item.id === cancelReasonId);
+      if (!chosen) throw new Error('Motivo de cancelamento não está disponível para este pedido. Atualize a lista da 99Food.');
+      payload.reason_id = Number(chosen.id);
+      payload.reason = chosen.description.slice(0, 200);
+      payload.cancel_reason = chosen.description.slice(0, 200);
     }
     if (plan.remote === 'delivered' && confirmationCode.trim()) {
       if (!/^\d{4,8}$/.test(confirmationCode.trim())) throw new Error('Código de entrega inválido.');
@@ -486,13 +524,29 @@ export async function handler(event) {
       return json(200, { ok: true, message: 'Fila 99Food disponível para guardar e recuperar notificações.' });
     }
 
+    if (action === 'cancellation_reasons') {
+      const orderId = String(body?.local_order_id || '').trim();
+      if (!/^[0-9a-f-]{36}$/i.test(orderId)) return json(400, { ok: false, error: 'Pedido inválido.' });
+      if (!(await canCancelFood99(auth, integration.franchise_id)))
+        return json(403, { ok: false, error: 'Somente a gestão pode cancelar pedidos da 99Food.' });
+      const rows = await sbGet(`customer_orders?select=id,franchise_id,status,delivery,delivery_source,platform_order_id&id=eq.${encodeURIComponent(orderId)}&franchise_id=eq.${encodeURIComponent(integration.franchise_id)}&limit=1`, auth.token);
+      const order = rows?.[0];
+      if (!order || order.delivery_source !== '99delivery' || !/^\d{8,24}$/.test(String(order.platform_order_id || '')))
+        return json(403, { ok: false, error: 'Pedido não pertence à 99Food desta franquia.' });
+      if (!planFood99StatusChange(order.status, 'cancelled', { delivery: order.delivery }).ok)
+        return json(409, { ok: false, error: 'Este pedido não permite mais cancelamento.' });
+      const reasons = await getFood99CancellationReasons(integration, auth, order);
+      return json(200, { ok: true, reasons });
+    }
+
     if (action === 'change_order_status') {
       const orderId = String(body?.local_order_id || '').trim();
       const expected = String(body?.expected_status || '').trim();
       const next = String(body?.next_status || '').trim();
       const confirmationCode = String(body?.confirmation_code || '').trim();
       const cancelReason = String(body?.cancel_reason || '').trim();
-      const result = await changeFood99OrderStatus(integration, auth, { orderId, expected, next, confirmationCode, cancelReason });
+      const cancelReasonId = String(body?.cancel_reason_id || '').trim();
+      const result = await changeFood99OrderStatus(integration, auth, { orderId, expected, next, confirmationCode, cancelReason, cancelReasonId });
       return json(200, result);
     }
 
