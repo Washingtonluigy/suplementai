@@ -352,8 +352,8 @@ async function changeFood99OrderStatus(integration, auth, { orderId, expected, n
       if (!/^\d{4,8}$/.test(confirmationCode.trim())) throw new Error('Código de entrega inválido.');
       payload.verify_code = confirmationCode.trim();
     }
-    let remote;
-    let httpStatus;
+    let raw = '';
+    let httpStatus = 0;
     try {
       const result = await fetch(`https://openapi.99food.com${endpoint}`, {
         method: 'POST',
@@ -361,10 +361,17 @@ async function changeFood99OrderStatus(integration, auth, { orderId, expected, n
         body: JSON.stringify(payload),
       });
       httpStatus = result.status;
-      const raw = await result.text();
-      remote = raw ? parseFood99Json(raw) : {};
+      raw = await result.text();
     } catch (error) {
       throw new Error(`Não foi possível comunicar com a 99Food: ${error instanceof Error ? error.message : String(error)}. O status local permanece igual.`);
+    }
+    let remote;
+    try {
+      remote = raw.trim() ? parseFood99Json(raw) : {};
+    } catch {
+      // A API pode ter processado a requisição antes de devolver resposta inválida.
+      // Não presumir sucesso nem repetir automaticamente uma operação com efeito remoto.
+      throw new Error(`A 99Food devolveu uma resposta em formato inesperado (HTTP ${httpStatus}). O status local não foi alterado. Consulte o pedido no Sandbox antes de tentar novamente.`);
     }
     const checked = parseFood99StatusReply(httpStatus, remote);
     if (!checked.ok) throw new Error(`99Food não confirmou ${next}: ${checked.message}. O status no Suplementaai não foi alterado.`);
