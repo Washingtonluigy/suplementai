@@ -2,7 +2,7 @@ import { SUPABASE_URL, SUPABASE_ANON_KEY, getSupabaseUser } from './_supabase-pu
 import { connectLambda, getStore } from '@netlify/blobs';
 import { normalizeFood99Order, getOrderInfo, getOrderId, getShopId, parseFood99Json, verifyFood99OrderShop } from './_food99-orders.mjs';
 import { FOOD99_ACTION_ENDPOINTS, planFood99StatusChange, parseFood99StatusReply } from './_food99-status.mjs';
-import { normalizeFood99CancellationReasons } from './_food99-cancel-reasons.mjs';
+import { getFood99OfficialCancellationReasons } from './_food99-cancel-reasons.mjs';
 
 const json = (statusCode, body) => ({
   statusCode,
@@ -250,35 +250,15 @@ async function getFood99OrderDetail(integration, auth, orderId) {
   return data;
 }
 
-// Consulta SOMENTE LEITURA; não cancela ao carregar os motivos.
-// O detalhe do pedido é o primeiro local onde procuramos motivos com IDs.
-// O endpoint adicional é uma tentativa de descoberta, ainda dependente de
-// confirmação no Sandbox/contrato oficial da conta 99Food.
+// A 99Food publica os reason_id na própria documentação oficial da API de
+// cancelamento. Não existe necessidade de descobrir uma rota /cancel/reasons.
+// Antes de exibir a lista, confirme o pedido por consulta autenticada e a loja.
 async function getFood99CancellationReasons(integration, auth, order) {
   const detail = await getFood99OrderDetail(integration, auth, String(order.platform_order_id));
   const normalized = normalizeFood99Order(detail, String(order.platform_order_id));
   const shopCheck = verifyFood99OrderShop(normalized, String(integration.store_id || ''), String(integration.food99?.appShopId || ''));
   if (!shopCheck.ok) throw new Error(`Não foi possível confirmar a loja do pedido na 99Food: ${shopCheck.message}`);
-  let reasons = normalizeFood99CancellationReasons(detail);
-  if (reasons.length) return reasons;
-
-  const tokenInfo = await getValidFood99AuthToken(integration, auth);
-  const params = new URLSearchParams({ auth_token: tokenInfo.token, order_id: String(order.platform_order_id) });
-  // Consulta exploratória sem efeito de alteração de pedido. Se a conta não
-  // disponibilizar esta rota, NÃO inventamos códigos nem cancelamos.
-  const url = `https://openapi.99food.com/v1/order/order/cancel/reasons?${params.toString()}`;
-  try {
-    const response = await fetch(url, { method: 'GET', headers: { Accept: 'application/json', 'Cache-Control': 'no-store' } });
-    if (response.ok) {
-      const raw = await response.text();
-      const result = raw ? parseFood99Json(raw) : {};
-      if (Number(result?.errno ?? result?.code ?? -1) === 0) {
-        reasons = normalizeFood99CancellationReasons(result);
-        if (reasons.length) return reasons;
-      }
-    }
-  } catch { /* Indisponibilidade de consulta: falhar fechado sem cancelar. */ }
-  throw new Error('A 99Food não disponibilizou IDs de motivos de cancelamento para este pedido. Nenhum cancelamento foi enviado. Precisamos confirmar na documentação da 99Food a rota oficial que lista os motivos (reason_id) para sua conta.');
+  return getFood99OfficialCancellationReasons();
 }
 
 async function importFood99Order(integration, auth, normalized) {
@@ -376,15 +356,23 @@ async function changeFood99OrderStatus(integration, auth, { orderId, expected, n
     const endpoint = FOOD99_ACTION_ENDPOINTS[plan.remote];
     const payload = { auth_token: tokenInfo.token, order_id: String(order.platform_order_id) };
     if (plan.remote === 'cancel') {
-      // A 99Food exige reason_id numérico. Validar no servidor que o ID veio
-      // da lista retornada pela própria 99Food para ESSE pedido e loja.
-      if (!/^\d{1,12}$/.test(cancelReasonId)) throw new Error('Selecione um motivo de cancelamento da própria 99Food.');
+      // IDs conforme a lista oficial publicada no endpoint POST /v1/order/order/cancel.
+      if (!/^\d{4}$/.test(cancelReasonId)) throw new Error('Selecione um motivo oficial de cancelamento da 99Food.');
       const official = await getFood99CancellationReasons(integration, auth, order);
       const chosen = official.find(item => item.id === cancelReasonId);
-      if (!chosen) throw new Error('Motivo de cancelamento não está disponível para este pedido. Atualize a lista da 99Food.');
+      if (!chosen) throw new Error('Motivo de cancelamento inválido para a 99Food. Selecione uma opção da lista.');
+      if (chosen.applicableTo === 'self_delivery' && !order.delivery) {
+        throw new Error('Este motivo é válido somente para pedidos de entrega da própria loja.');
+      }
+      // A API da 99Food confirma a modalidade; uma loja com entrega pela
+      // plataforma poderá ter um motivo de autoentrega recusado remotamente.
+      const extraReason = String(cancelReason || '').trim();
+      if (chosen.id === '1080' && !extraReason) {
+        throw new Error('Para "Outra razão", descreva especificamente o motivo do cancelamento.');
+      }
       payload.reason_id = Number(chosen.id);
-      payload.reason = chosen.description.slice(0, 200);
-      payload.cancel_reason = chosen.description.slice(0, 200);
+      if (extraReason) payload.reason = extraReason.slice(0, 500);
+      // Não enviar cancel_reason: não faz parte dos parâmetros oficiais.
     }
     if (plan.remote === 'delivered' && confirmationCode.trim()) {
       if (!/^\d{4,8}$/.test(confirmationCode.trim())) throw new Error('Código de entrega inválido.');
@@ -413,6 +401,10 @@ async function changeFood99OrderStatus(integration, auth, { orderId, expected, n
     }
     const checked = parseFood99StatusReply(httpStatus, remote);
     if (!checked.ok) throw new Error(`99Food não confirmou ${next}: ${checked.message}. O status no Suplementaai não foi alterado.`);
+    // Para cancelamento a documentação também exige data=true como confirmação.
+    if (plan.remote === 'cancel' && remote?.data !== true) {
+      throw new Error('A 99Food não confirmou o cancelamento (data diferente de true). O status local não foi alterado.');
+    }
     remoteStatus = 'confirmed';
   }
 
